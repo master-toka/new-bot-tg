@@ -1,6 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from typing import List, Optional
+
 from config import DISTRICTS
 
 def get_role_keyboard() -> InlineKeyboardMarkup:
@@ -65,8 +65,8 @@ def get_installer_request_keyboard(request_id: int, has_coords: bool = False) ->
     
     if has_coords:
         builder.add(InlineKeyboardButton(
-            text="🗺 Открыть на карте",
-            url=f"https://yandex.ru/maps/?pt={request_id}"  # Здесь будет реальная логика
+            text="🗺 Показать на карте",
+            callback_data=f"view_coords_{request_id}"
         ))
     
     builder.add(InlineKeyboardButton(
@@ -106,6 +106,10 @@ def get_admin_menu_keyboard() -> InlineKeyboardMarkup:
     builder.add(InlineKeyboardButton(
         text="❌ Отказы",
         callback_data="admin_stats_refusals"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="🏘 Проверить районы",
+        callback_data="admin_check_districts"
     ))
     
     builder.adjust(1)
