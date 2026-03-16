@@ -2,13 +2,13 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from models import User, Request, District, Refusal
 from keyboards import admin_panel
 from config import ADMIN_ID
 
 router = Router()
+
 
 @router.message(Command("admin"))
 async def admin_panel_cmd(message: Message):
