@@ -1,11 +1,10 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, desc
+from sqlalchemy import select, func, and_
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 import logging
 
 from models import User, Request, District, Refusal, RequestStatus, UserRole
-from config import REQUEST_STATUS_COMPLETED
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +21,10 @@ class StatisticsService:
         Получение общей статистики
         """
         try:
-            # Количество пользователей
             customers_count = await self._count_users(UserRole.CUSTOMER)
             installers_count = await self._count_users(UserRole.INSTALLER)
-            
-            # Количество заявок по статусам
             requests_stats = await self._count_requests_by_status()
-            
-            # Количество отказов
             refusals_count = await self._count_refusals()
-            
-            # Среднее время выполнения
             avg_completion_time = await self._get_avg_completion_time()
             
             return {
@@ -62,19 +54,12 @@ class StatisticsService:
             
             result = []
             for district in districts:
-                # Общее количество заявок в районе
                 total_requests = await self._count_requests_by_district(district.id)
-                
-                # Количество выполненных заявок
                 completed_requests = await self._count_requests_by_district(
-                    district.id, 
-                    RequestStatus.COMPLETED
+                    district.id, RequestStatus.COMPLETED
                 )
-                
-                # Количество активных заявок
                 active_requests = await self._count_requests_by_district(
-                    district.id,
-                    RequestStatus.IN_PROGRESS
+                    district.id, RequestStatus.IN_PROGRESS
                 )
                 
                 result.append({
@@ -106,28 +91,21 @@ class StatisticsService:
             
             result = []
             for installer in installers:
-                # Количество выполненных заявок
                 completed = await self._count_installer_requests(
-                    installer.id, 
-                    RequestStatus.COMPLETED
+                    installer.id, RequestStatus.COMPLETED
                 )
-                
-                # Количество взятых заявок
-                taken = await self._count_installer_requests(
-                    installer.id,
-                    RequestStatus.IN_PROGRESS
+                in_progress = await self._count_installer_requests(
+                    installer.id, RequestStatus.IN_PROGRESS
                 )
-                
-                # Количество отказов
                 refusals = await self._count_installer_refusals(installer.id)
                 
                 result.append({
                     "installer_id": installer.id,
                     "name": installer.first_name or installer.username or f"ID {installer.telegram_id}",
                     "completed": completed,
-                    "in_progress": taken,
+                    "in_progress": in_progress,
                     "refusals": refusals,
-                    "total_taken": completed + taken + refusals
+                    "total_taken": completed + in_progress + refusals
                 })
             
             return sorted(result, key=lambda x: x["completed"], reverse=True)
@@ -136,6 +114,38 @@ class StatisticsService:
             logger.error(f"Ошибка при получении статистики по монтажникам: {e}")
             return []
     
+    async def get_installer_personal_stats(self, installer_id: int) -> Dict[str, Any]:
+        """
+        Личная статистика монтажника
+        """
+        try:
+            completed = await self._count_installer_requests(installer_id, RequestStatus.COMPLETED)
+            in_progress = await self._count_installer_requests(installer_id, RequestStatus.IN_PROGRESS)
+            refusals = await self._count_installer_refusals(installer_id)
+            
+            # За последние 30 дней
+            month_ago = datetime.now() - timedelta(days=30)
+            query = select(Request).where(
+                and_(
+                    Request.installer_id == installer_id,
+                    Request.status == RequestStatus.COMPLETED,
+                    Request.completed_at >= month_ago
+                )
+            )
+            result = await self.session.execute(query)
+            month_completed = len(result.scalars().all())
+            
+            return {
+                "completed": completed,
+                "in_progress": in_progress,
+                "refusals": refusals,
+                "month_completed": month_completed
+            }
+            
+        except Exception as e:
+            logger.error(f"Ошибка при получении личной статистики: {e}")
+            return {}
+    
     async def get_refusal_stats(self, days: int = 30) -> List[Dict[str, Any]]:
         """
         Статистика отказов за последние N дней
@@ -143,16 +153,16 @@ class StatisticsService:
         try:
             since_date = datetime.now() - timedelta(days=days)
             
-            query = select(Refusal).where(Refusal.created_at >= since_date)
+            query = select(Refusal).where(Refusal.created_at >= since_date).order_by(Refusal.created_at.desc())
             refusals = await self.session.execute(query)
             refusals = refusals.scalars().all()
             
             result = []
-            for refusal in refusals:
+            for refusal in refusals[:20]:  # Показываем последние 20
                 result.append({
                     "id": refusal.id,
                     "request_id": refusal.request_id,
-                    "installer_name": refusal.installer.first_name or refusal.installer.username,
+                    "installer_name": refusal.installer.first_name or refusal.installer.username or "Неизвестно",
                     "reason": refusal.reason,
                     "date": refusal.created_at.strftime("%d.%m.%Y %H:%M")
                 })
@@ -168,16 +178,11 @@ class StatisticsService:
         Статистика за определенный период
         """
         try:
-            # Заявки созданные за период
             new_requests = await self._count_requests_by_period(start_date, end_date)
-            
-            # Заявки выполненные за период
             completed_requests = await self._count_requests_by_period(
                 start_date, end_date, RequestStatus.COMPLETED
             )
-            
-            # Заявки в работе
-            in_progress = await self._count_requests_by_status(
+            in_progress = await self._count_requests_by_status_in_period(
                 RequestStatus.IN_PROGRESS, start_date, end_date
             )
             
@@ -198,33 +203,34 @@ class StatisticsService:
     
     # Вспомогательные методы
     async def _count_users(self, role: UserRole) -> int:
-        """Подсчет пользователей по роли"""
         query = select(func.count()).select_from(User).where(User.role == role)
         result = await self.session.execute(query)
         return result.scalar() or 0
     
-    async def _count_requests_by_status(self, status: Optional[RequestStatus] = None) -> Dict[str, int]:
-        """Подсчет заявок по статусам"""
-        if status:
+    async def _count_requests_by_status(self) -> Dict[str, int]:
+        stats = {}
+        for status in RequestStatus:
             query = select(func.count()).select_from(Request).where(Request.status == status)
             result = await self.session.execute(query)
-            return {status.value: result.scalar() or 0}
-        else:
-            stats = {}
-            for status in RequestStatus:
-                query = select(func.count()).select_from(Request).where(Request.status == status)
-                result = await self.session.execute(query)
-                stats[status.value] = result.scalar() or 0
-            return stats
+            stats[status.value] = result.scalar() or 0
+        return stats
+    
+    async def _count_requests_by_status_in_period(self, status: RequestStatus, start: datetime, end: datetime) -> int:
+        query = select(func.count()).select_from(Request).where(
+            and_(
+                Request.status == status,
+                Request.created_at.between(start, end)
+            )
+        )
+        result = await self.session.execute(query)
+        return result.scalar() or 0
     
     async def _count_refusals(self) -> int:
-        """Подсчет всех отказов"""
         query = select(func.count()).select_from(Refusal)
         result = await self.session.execute(query)
         return result.scalar() or 0
     
     async def _get_avg_completion_time(self) -> Optional[float]:
-        """Среднее время выполнения заявки в часах"""
         query = select(
             func.avg(
                 func.extract('epoch', Request.completed_at - Request.taken_at) / 3600
@@ -239,7 +245,6 @@ class StatisticsService:
         return round(avg_time, 1) if avg_time else None
     
     async def _count_requests_by_district(self, district_id: int, status: Optional[RequestStatus] = None) -> int:
-        """Подсчет заявок в районе"""
         query = select(func.count()).select_from(Request).where(
             Request.district_id == district_id
         )
@@ -249,7 +254,6 @@ class StatisticsService:
         return result.scalar() or 0
     
     async def _count_installer_requests(self, installer_id: int, status: RequestStatus) -> int:
-        """Подсчет заявок монтажника по статусу"""
         query = select(func.count()).select_from(Request).where(
             Request.installer_id == installer_id,
             Request.status == status
@@ -258,20 +262,13 @@ class StatisticsService:
         return result.scalar() or 0
     
     async def _count_installer_refusals(self, installer_id: int) -> int:
-        """Подсчет отказов монтажника"""
         query = select(func.count()).select_from(Refusal).where(
             Refusal.installer_id == installer_id
         )
         result = await self.session.execute(query)
         return result.scalar() or 0
     
-    async def _count_requests_by_period(
-        self, 
-        start_date: datetime, 
-        end_date: datetime, 
-        status: Optional[RequestStatus] = None
-    ) -> int:
-        """Подсчет заявок за период"""
+    async def _count_requests_by_period(self, start_date: datetime, end_date: datetime, status: Optional[RequestStatus] = None) -> int:
         query = select(func.count()).select_from(Request).where(
             Request.created_at.between(start_date, end_date)
         )
