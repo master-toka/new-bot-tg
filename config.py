@@ -1,9 +1,15 @@
 import os
 from typing import Final, List
 from dotenv import load_dotenv
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
+logger.info("Загрузка .env файла...")
 
 # Проверка наличия обязательных переменных
 BOT_TOKEN: Final[str] = os.getenv('BOT_TOKEN')
@@ -24,18 +30,19 @@ GEOCODER_API_KEY: Final[str] = os.getenv('GEOCODER_API_KEY', '')
 
 DATABASE_URL: Final[str] = os.getenv('DATABASE_URL', 'sqlite+aiosqlite:///montage_bot.db')
 
-# Список районов города
+# СПИСОК РАЙОНОВ - исправленный под ваши требования
 DISTRICTS: Final[List[str]] = [
-    "Центральный",
-    "Северный",
-    "Северо-Западный",
-    "Северо-Восточный",
-    "Южный",
-    "Юго-Западный",
-    "Юго-Восточный",
-    "Западный",
+    "Центр",
+    "Шишковка", 
     "Восточный",
-    "Пригородный"
+    "Верхняя Березовка",
+    "100-е квартала",
+    "Восточные ворота",
+    "Комушка",
+    "Вахмистрово",
+    "Зверосовхоз",
+    "Южлаг",
+    "Другой"
 ]
 
 # Константы для статусов заявок
