@@ -14,7 +14,7 @@ from keyboards.reply import get_installer_main_keyboard, get_cancel_keyboard, re
 from keyboards.inline import get_installer_request_keyboard, get_confirmation_keyboard
 from services.notifications import NotificationService
 from services.statistics import StatisticsService
-from utils.helpers import extract_message_id, json_deserialize_photos, format_phone
+from utils.helpers import extract_message_id, format_phone
 from config import GROUP_ID
 from utils.db_helper import with_session
 
@@ -396,6 +396,11 @@ async def confirm_complete_request(callback: CallbackQuery, session):
             await callback.answer("❌ У вас нет прав для завершения этой заявки")
             return
         
+        # Проверяем статус
+        if request.status != RequestStatus.IN_PROGRESS:
+            await callback.answer("❌ Заявка уже завершена или не в работе")
+            return
+        
         # Обновляем статус
         request.status = RequestStatus.COMPLETED
         request.completed_at = datetime.now()
@@ -414,7 +419,10 @@ async def confirm_complete_request(callback: CallbackQuery, session):
         )
         
         # Обновляем сообщение в ЛС монтажника
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except:
+            pass
         
         # Обновляем сообщение в группе
         query = select(GroupMessage).where(GroupMessage.request_id == request.id)
@@ -526,16 +534,6 @@ async def send_request_details(message: Message, request: Request, installer: Us
     Отправка деталей заявки монтажнику
     """
     try:
-        notification_service = NotificationService(message.bot, session)
-        await notification_service.send_request_details_to_installer(request, installer)
-    except Exception as e:
-        logger.error(f"Ошибка отправки деталей заявки: {e}")
-
-async def send_request_details(message: Message, request: Request, installer: User, session):
-    """
-    Отправка деталей заявки монтажнику
-    """
-    try:
         # Создаем notification service с текущей сессией
         notification_service = NotificationService(message.bot, session)
         
@@ -546,5 +544,3 @@ async def send_request_details(message: Message, request: Request, installer: Us
     except Exception as e:
         logger.error(f"Ошибка отправки деталей заявки: {e}")
         # Не показываем ошибку пользователю, просто логируем
-
-
