@@ -1,6 +1,5 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
-from typing import List
 
 def get_customer_main_keyboard() -> ReplyKeyboardMarkup:
     """
@@ -23,9 +22,10 @@ def get_installer_main_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     
     builder.add(KeyboardButton(text="📋 Мои заявки"))
+    builder.add(KeyboardButton(text="📊 Моя статистика"))
     builder.add(KeyboardButton(text="ℹ️ Помощь"))
     
-    builder.adjust(2)
+    builder.adjust(2, 1)
     
     return builder.as_markup(resize_keyboard=True)
 
