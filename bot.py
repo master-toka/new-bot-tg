@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Монтажный бот - система для заказа и выполнения монтажных работ
-Версия: 1.0.0
-"""
-
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
@@ -12,8 +6,9 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from config import BOT_TOKEN, LOG_FORMAT, LOG_LEVEL, ADMIN_ID, GROUP_ID
-from database import init_db, get_db
+from database import init_db, get_db, close_db
 from handlers import common, customer, installer, admin, group
+from utils.init_districts import init_districts  # Добавлен импорт
 
 # Настройка логирования
 logging.basicConfig(
@@ -56,6 +51,16 @@ async def on_startup(bot: Bot):
     try:
         await init_db()
         logger.info("База данных инициализирована")
+        
+        # Инициализация районов
+        async for session in get_db():
+            try:
+                await init_districts(session)
+                logger.info("Районы инициализированы")
+            except Exception as e:
+                logger.error(f"Ошибка при инициализации районов: {e}")
+            break
+            
     except Exception as e:
         logger.error(f"Ошибка инициализации БД: {e}")
         raise
@@ -96,6 +101,13 @@ async def on_shutdown(bot: Bot):
         )
     except Exception as e:
         logger.error(f"Не удалось отправить уведомление о остановке: {e}")
+    
+    # Закрываем соединения с БД
+    try:
+        await close_db()
+        logger.info("Соединения с БД закрыты")
+    except Exception as e:
+        logger.error(f"Ошибка при закрытии соединений с БД: {e}")
     
     # Закрываем все сессии
     await bot.session.close()
