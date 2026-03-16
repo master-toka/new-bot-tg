@@ -530,3 +530,21 @@ async def send_request_details(message: Message, request: Request, installer: Us
         await notification_service.send_request_details_to_installer(request, installer)
     except Exception as e:
         logger.error(f"Ошибка отправки деталей заявки: {e}")
+
+async def send_request_details(message: Message, request: Request, installer: User, session):
+    """
+    Отправка деталей заявки монтажнику
+    """
+    try:
+        # Создаем notification service с текущей сессией
+        notification_service = NotificationService(message.bot, session)
+        
+        # Отправляем детали
+        await notification_service.send_request_details_to_installer(request, installer)
+        
+        logger.info(f"Детали заявки {request.id} отправлены монтажнику {installer.telegram_id}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки деталей заявки: {e}")
+        # Не показываем ошибку пользователю, просто логируем
+
+
