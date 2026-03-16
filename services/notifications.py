@@ -1,9 +1,10 @@
 from aiogram import Bot
 from aiogram.types import InputMediaPhoto
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 import logging
 import json
-from typing import List
+from typing import List, Optional
 
 from models import Request, User
 from keyboards.inline import get_request_action_keyboard, get_installer_request_keyboard
@@ -20,7 +21,7 @@ class NotificationService:
         self.bot = bot
         self.session = session
     
-    async def send_request_to_group(self, request: Request, group_id: int):
+    async def send_request_to_group(self, request: Request, group_id: int) -> Optional[object]:
         """
         Отправка заявки в группу монтажников
         """
@@ -120,6 +121,7 @@ class NotificationService:
             
         except Exception as e:
             logger.error(f"Ошибка отправки деталей заявки монтажнику: {e}")
+            # Не пробрасываем ошибку дальше, чтобы не ломать основной поток
     
     async def notify_customer(self, customer_id: int, text: str):
         """
