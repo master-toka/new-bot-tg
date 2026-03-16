@@ -18,11 +18,15 @@ if not BOT_TOKEN:
 
 try:
     ADMIN_ID: Final[int] = int(os.getenv('ADMIN_ID', 0))
+    if ADMIN_ID == 0:
+        logger.warning("ADMIN_ID не установлен или равен 0")
 except ValueError:
     raise ValueError("ADMIN_ID должен быть числом")
 
 try:
     GROUP_ID: Final[int] = int(os.getenv('GROUP_ID', 0))
+    if GROUP_ID == 0:
+        logger.warning("GROUP_ID не установлен или равен 0")
 except ValueError:
     raise ValueError("GROUP_ID должен быть числом")
 
@@ -58,3 +62,7 @@ ROLE_INSTALLER: Final[str] = "installer"
 # Логирование
 LOG_FORMAT: Final[str] = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_LEVEL: Final[str] = "INFO"
+
+logger.info(f"Конфигурация загружена. BOT_TOKEN: {'установлен' if BOT_TOKEN else 'не установлен'}")
+logger.info(f"ADMIN_ID: {ADMIN_ID}, GROUP_ID: {GROUP_ID}")
+logger.info(f"Районов в системе: {len(DISTRICTS)}")
