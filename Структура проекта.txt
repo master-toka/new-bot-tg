@@ -1,0 +1,15 @@
+montage_bot/
+├── bot.py                 # точка входа
+├── config.py              # конфигурация (токены, ID)
+├── database.py            # настройка БД и сессий
+├── models.py              # модели SQLAlchemy
+├── keyboards.py           # клавиатуры (reply/inline)
+├── utils.py               # геокодирование, логирование, helpers
+├── handlers/
+│   ├── __init__.py
+│   ├── common.py          # /start, регистрация роли
+│   ├── customer.py        # создание заявки (FSM)
+│   ├── installer.py       # логика для монтажников (группа и ЛС)
+│   └── admin.py           # панель администратора, статистика
+├── .env                   # переменные окружения
+└── requirements.txt       # зависимости
