@@ -3,14 +3,15 @@ from aiogram.types import Message, CallbackQuery, ContentType
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_
 import logging
 import json
 
 from database import get_db
-from models import User, Request, District, GroupMessage, RequestStatus
+from models import User, Request, District, GroupMessage, RequestStatus, UserRole
 from states.customer_states import RequestStates
 from keyboards.reply import (
+    get_customer_main_keyboard,
     get_cancel_keyboard, 
     get_location_keyboard, 
     get_done_keyboard,
@@ -20,7 +21,7 @@ from keyboards.inline import get_district_keyboard
 from services.geocoder import GeocoderService
 from services.notifications import NotificationService
 from utils.helpers import json_serialize_photos, validate_phone
-from config import GROUP_ID, REQUEST_STATUS_NEW
+from config import GROUP_ID
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,11 @@ async def cmd_new_request(message: Message, state: FSMContext, session: AsyncSes
         result = await session.execute(query)
         user = result.scalar_one_or_none()
         
-        if not user or user.role.value != "customer":
+        if not user:
+            await message.answer("Пожалуйста, зарегистрируйтесь через /start")
+            return
+        
+        if user.role != UserRole.CUSTOMER:
             await message.answer("Эта функция доступна только заказчикам.")
             return
         
@@ -69,7 +74,7 @@ async def process_description(message: Message, state: FSMContext):
     """
     if message.text == "⬅️ Отмена":
         await state.clear()
-        await message.answer("Создание заявки отменено.", reply_markup=remove_keyboard)
+        await message.answer("Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
         return
     
     if not message.text or len(message.text) < 10:
@@ -114,7 +119,7 @@ async def process_photos(message: Message, state: FSMContext):
     
     elif message.text == "⬅️ Отмена":
         await state.clear()
-        await message.answer("Создание заявки отменено.", reply_markup=remove_keyboard)
+        await message.answer("Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
     
     elif message.photo:
         # Сохраняем file_id фото
@@ -173,7 +178,7 @@ async def process_manual_address(message: Message, state: FSMContext):
     """
     if message.text == "⬅️ Отмена":
         await state.clear()
-        await message.answer("Создание заявки отменено.", reply_markup=remove_keyboard)
+        await message.answer("Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
         return
     
     if message.text == "✏️ Ввести адрес вручную":
@@ -190,7 +195,7 @@ async def process_manual_address_input(message: Message, state: FSMContext):
     """
     if message.text == "⬅️ Отмена":
         await state.clear()
-        await message.answer("Создание заявки отменено.", reply_markup=remove_keyboard)
+        await message.answer("Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
         return
     
     if not message.text or len(message.text) < 5:
@@ -214,7 +219,7 @@ async def process_phone(message: Message, state: FSMContext, session: AsyncSessi
     """
     if message.text == "⬅️ Отмена":
         await state.clear()
-        await message.answer("Создание заявки отменено.", reply_markup=remove_keyboard)
+        await message.answer("Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
         return
     
     phone = message.text
@@ -318,3 +323,223 @@ async def process_district(callback: CallbackQuery, state: FSMContext, session: 
         logger.error(f"Ошибка при создании заявки: {e}")
         await callback.answer("Ошибка при создании заявки")
         await session.rollback()
+
+@router.message(Command("my_requests"))
+@router.message(F.text == "📋 Мои заявки")
+async def cmd_my_requests(message: Message, session: AsyncSession = None):
+    """
+    Просмотр заявок заказчика
+    """
+    try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
+        # Получаем пользователя
+        query = select(User).where(User.telegram_id == message.from_user.id)
+        result = await session.execute(query)
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            await message.answer("Пользователь не найден. Используйте /start для регистрации.")
+            return
+        
+        # Проверяем роль пользователя
+        if user.role == UserRole.INSTALLER:
+            # Если это монтажник, перенаправляем на его обработчик
+            from handlers.installer import cmd_my_requests as installer_my_requests
+            await installer_my_requests(message, session)
+            return
+        
+        # Получаем все заявки заказчика
+        query = select(Request).where(
+            Request.customer_id == user.id
+        ).order_by(Request.created_at.desc())
+        
+        result = await session.execute(query)
+        requests = result.scalars().all()
+        
+        if not requests:
+            await message.answer(
+                "У вас пока нет заявок.\n"
+                "Создайте новую заявку через меню 📝 Новая заявка",
+                reply_markup=get_customer_main_keyboard()
+            )
+            return
+        
+        # Статусы на русском
+        status_names = {
+            "new": "🟡 Новая",
+            "in_progress": "🔵 В работе",
+            "completed": "✅ Выполнена",
+            "cancelled": "❌ Отменена"
+        }
+        
+        # Отправляем список заявок
+        text = "📋 <b>Ваши заявки:</b>\n\n"
+        
+        for req in requests[:10]:  # Показываем последние 10 заявок
+            status_text = status_names.get(req.status.value, req.status.value)
+            text += f"🔨 <b>Заявка #{req.id}</b> - {status_text}\n"
+            text += f"📍 Адрес: {req.address[:50]}{'...' if len(req.address) > 50 else ''}\n"
+            text += f"📅 Создана: {req.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            
+            if req.installer:
+                text += f"👤 Монтажник: {req.installer.first_name or req.installer.username}\n"
+            
+            text += "➖➖➖➖➖➖➖\n\n"
+        
+        await message.answer(text, parse_mode="HTML")
+        
+        # Предлагаем посмотреть детали конкретной заявки
+        await message.answer(
+            "Чтобы посмотреть детали заявки, отправьте команду:\n"
+            "/request <номер заявки>\n\n"
+            "Например: /request 1",
+            reply_markup=get_customer_main_keyboard()
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_my_requests (customer): {e}")
+        await message.answer("Произошла ошибка. Попробуйте позже.")
+
+@router.message(Command("request"))
+async def cmd_request_detail(message: Message, session: AsyncSession = None):
+    """
+    Просмотр деталей конкретной заявки
+    """
+    try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
+        # Получаем номер заявки из команды
+        parts = message.text.split()
+        if len(parts) != 2:
+            await message.answer(
+                "Использование: /request <номер заявки>\n"
+                "Например: /request 1"
+            )
+            return
+        
+        try:
+            request_id = int(parts[1])
+        except ValueError:
+            await message.answer("Номер заявки должен быть числом")
+            return
+        
+        # Получаем пользователя
+        query = select(User).where(User.telegram_id == message.from_user.id)
+        result = await session.execute(query)
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            await message.answer("Пользователь не найден.")
+            return
+        
+        # Получаем заявку
+        query = select(Request).where(
+            and_(
+                Request.id == request_id,
+                Request.customer_id == user.id
+            )
+        )
+        result = await session.execute(query)
+        request = result.scalar_one_or_none()
+        
+        if not request:
+            await message.answer("Заявка не найдена или у вас нет прав для её просмотра.")
+            return
+        
+        # Статусы на русском
+        status_names = {
+            "new": "🟡 Новая",
+            "in_progress": "🔵 В работе",
+            "completed": "✅ Выполнена",
+            "cancelled": "❌ Отменена"
+        }
+        
+        # Формируем детальное описание
+        text = f"🔨 <b>Заявка #{request.id}</b>\n\n"
+        text += f"<b>Статус:</b> {status_names.get(request.status.value, request.status.value)}\n"
+        text += f"<b>Описание:</b>\n{request.description}\n\n"
+        text += f"<b>Адрес:</b> {request.address}\n"
+        text += f"<b>Район:</b> {request.district.name}\n"
+        text += f"<b>Телефон:</b> {request.phone}\n"
+        text += f"\n<b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        if request.taken_at:
+            text += f"<b>Взята в работу:</b> {request.taken_at.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        if request.completed_at:
+            text += f"<b>Завершена:</b> {request.completed_at.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        if request.installer:
+            text += f"\n<b>Монтажник:</b> {request.installer.first_name or request.installer.username}"
+            if request.installer.phone:
+                text += f"\n<b>Телефон монтажника:</b> {request.installer.phone}"
+        
+        await message.answer(text, parse_mode="HTML")
+        
+        # Если есть фото, отправляем их
+        if request.photos:
+            try:
+                photos = json.loads(request.photos)
+                if photos:
+                    await message.answer("📸 <b>Фото заявки:</b>", parse_mode="HTML")
+                    for photo in photos[:5]:  # Отправляем не больше 5 фото
+                        await message.answer_photo(photo)
+            except json.JSONDecodeError:
+                logger.error(f"Ошибка парсинга фото для заявки {request.id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_request_detail: {e}")
+        await message.answer("Произошла ошибка. Попробуйте позже.")
+
+@router.message(Command("cancel"))
+@router.message(F.text == "⬅️ Отмена")
+async def cmd_cancel(message: Message, state: FSMContext):
+    """
+    Отмена текущего действия
+    """
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Нет активного действия.", reply_markup=get_customer_main_keyboard())
+        return
+    
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=get_customer_main_keyboard())
+
+@router.message(Command("help"))
+@router.message(F.text == "ℹ️ Помощь")
+async def cmd_help(message: Message):
+    """
+    Справка для заказчика
+    """
+    help_text = """
+<b>🔧 Помощь для заказчика</b>
+
+<b>Доступные команды:</b>
+• 📝 Новая заявка - создать заявку на монтаж
+• 📋 Мои заявки - посмотреть список ваших заявок
+• /request [номер] - посмотреть детали конкретной заявки
+• ℹ️ Помощь - показать это сообщение
+
+<b>Как создать заявку:</b>
+1. Нажмите "📝 Новая заявка"
+2. Опишите работы подробно
+3. Приложите фото (можно несколько)
+4. Укажите адрес (геолокация или вручную)
+5. Введите номер телефона
+6. Выберите район
+
+После создания заявки монтажники увидят её в общем чате и смогут взять в работу. Вы получите уведомление, когда заявка будет принята.
+
+По вопросам: @admin
+    """
+    
+    await message.answer(help_text, parse_mode="HTML", reply_markup=get_customer_main_keyboard())

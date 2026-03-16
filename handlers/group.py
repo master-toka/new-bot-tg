@@ -12,7 +12,7 @@ router = Router()
 
 # Фильтр для сообщений только из группы монтажников
 router.message.filter(F.chat.id == GROUP_ID)
-router.callback_query.filter(F.message.chat.id == GROUP_ID)
+
 
 @router.message()
 async def handle_group_message(message: Message):
@@ -28,14 +28,6 @@ async def handle_group_message(message: Message):
         # Можно добавить логирование или модерацию
         logger.info(f"Сообщение в группе от {message.from_user.id}: {message.text}")
 
-@router.callback_query()
-async def handle_group_callback(callback: CallbackQuery):
-    """
-    Обработка callback-запросов из группы
-    """
-    # Callback'и обрабатываются в других хендлерах (installer.py)
-    # Здесь только логируем
-    logger.info(f"Callback в группе: {callback.data} от {callback.from_user.id}")
 
 async def handle_new_member(message: Message):
     """
