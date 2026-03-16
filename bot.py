@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Монтажный бот - система для заказа и выполнения монтажных работ
+Версия: 2.0.0
+"""
+
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
@@ -8,7 +14,7 @@ from aiogram.enums import ParseMode
 from config import BOT_TOKEN, LOG_FORMAT, LOG_LEVEL, ADMIN_ID, GROUP_ID
 from database import init_db, get_db, close_db
 from handlers import common, customer, installer, admin, group
-from utils.init_districts import init_districts  # Добавлен импорт
+from utils.init_districts import init_districts
 
 # Настройка логирования
 logging.basicConfig(
