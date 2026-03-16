@@ -3,14 +3,15 @@ from aiogram.types import Message, CallbackQuery, InputMediaPhoto
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
-from models import User, Request, GroupMessage, Refusal
+from models import User, Request, GroupMessage, Refusal, District
 from keyboards import installer_menu, installer_request_actions, group_request_keyboard
 from utils import format_request_for_group, format_request_for_installer, logger
 from config import GROUP_ID, BOT_TOKEN
 import json
+from datetime import datetime
 
 router = Router()
 bot = Bot(token=BOT_TOKEN)
@@ -24,7 +25,7 @@ async def send_request_to_group(request_id: int, session: AsyncSession):
     request = await session.get(Request, request_id)
     customer = await session.get(User, request.customer_id)
     district = await session.get(District, request.district_id)
-    text = format_request_for_group(request, customer.name, district.name)
+    text = format_request_for_group(request, customer.name or "Заказчик", district.name)
     photos = json.loads(request.photos) if request.photos else []
 
     if photos:
@@ -59,7 +60,9 @@ async def take_request(callback: CallbackQuery, state: FSMContext):
 
     async for session in get_db():
         # Проверяем, что пользователь — монтажник
-        installer = await session.execute(select(User).where(User.telegram_id == installer_tg_id, User.role == "installer"))
+        installer = await session.execute(
+            select(User).where(User.telegram_id == installer_tg_id, User.role == "installer")
+        )
         installer = installer.scalar_one_or_none()
         if not installer:
             await callback.answer("Вы не зарегистрированы как монтажник.", show_alert=True)
@@ -74,18 +77,26 @@ async def take_request(callback: CallbackQuery, state: FSMContext):
         # Обновляем статус
         request.status = "in_progress"
         request.installer_id = installer.id
-        request.taken_at = func.now()
+        request.taken_at = datetime.now()
         await session.commit()
 
         # Редактируем сообщение в группе: убираем кнопки и добавляем инфо о взятии
-        group_msg = await session.execute(select(GroupMessage).where(GroupMessage.request_id == request_id))
-        group_msg = group_msg.scalar_one()
-        await bot.edit_message_text(
-            chat_id=GROUP_ID,
-            message_id=group_msg.message_id,
-            text=callback.message.text + f"\n\n✅ Взято монтажником: {installer.name}",
-            reply_markup=None
+        group_msg = await session.execute(
+            select(GroupMessage).where(GroupMessage.request_id == request_id)
         )
+        group_msg = group_msg.scalar_one()
+        
+        # Получаем текущее сообщение
+        try:
+            await bot.edit_message_text(
+                chat_id=GROUP_ID,
+                message_id=group_msg.message_id,
+                text=callback.message.text + f"\n\n✅ Взято монтажником: {installer.name}",
+                reply_markup=None
+            )
+        except:
+            # Если не удалось отредактировать (например, медиагруппа)
+            pass
 
         # Уведомляем заказчика
         customer = await session.get(User, request.customer_id)
@@ -103,7 +114,7 @@ async def send_request_details_to_installer(request_id: int, installer_tg_id: in
     request = await session.get(Request, request_id)
     customer = await session.get(User, request.customer_id)
     district = await session.get(District, request.district_id)
-    text = format_request_for_installer(request, customer.name, district.name)
+    text = format_request_for_installer(request, customer.name or "Заказчик", district.name)
     photos = json.loads(request.photos) if request.photos else []
     has_coords = request.latitude is not None
 
@@ -112,11 +123,18 @@ async def send_request_details_to_installer(request_id: int, installer_tg_id: in
         for p in photos[1:]:
             media.append(InputMediaPhoto(media=p))
         await bot.send_media_group(installer_tg_id, media)
-        # Кнопки прикрепим к первому сообщению
-        # TODO: получить message_id первого сообщения и отредактировать с кнопками - сложно с media_group, можно просто отправить отдельно кнопки
-        await bot.send_message(installer_tg_id, "Действия:", reply_markup=installer_request_actions(request_id, has_coords))
+        # Отправляем кнопки отдельным сообщением
+        await bot.send_message(
+            installer_tg_id, 
+            "Действия с заявкой:", 
+            reply_markup=installer_request_actions(request_id, has_coords)
+        )
     else:
-        await bot.send_message(installer_tg_id, text, reply_markup=installer_request_actions(request_id, has_coords))
+        await bot.send_message(
+            installer_tg_id, 
+            text, 
+            reply_markup=installer_request_actions(request_id, has_coords)
+        )
 
 # Обработка отказа
 @router.callback_query(F.data.startswith("refuse_"))
@@ -125,7 +143,9 @@ async def refuse_request(callback: CallbackQuery, state: FSMContext):
     installer_tg_id = callback.from_user.id
 
     async for session in get_db():
-        installer = await session.execute(select(User).where(User.telegram_id == installer_tg_id, User.role == "installer"))
+        installer = await session.execute(
+            select(User).where(User.telegram_id == installer_tg_id, User.role == "installer")
+        )
         installer = installer.scalar_one_or_none()
         if not installer:
             await callback.answer("Вы не монтажник.", show_alert=True)
@@ -136,11 +156,11 @@ async def refuse_request(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Заявка уже обработана.", show_alert=True)
             return
 
-    # Запускаем FSM для ввода причины
-    await state.set_state(RefuseFSM.reason)
-    await state.update_data(request_id=request_id, installer_id=installer.id)
-    await callback.message.answer("Укажите причину отказа:")
-    await callback.answer()
+        # Запускаем FSM для ввода причины
+        await state.set_state(RefuseFSM.reason)
+        await state.update_data(request_id=request_id, installer_id=installer.id)
+        await callback.message.answer("Укажите причину отказа:")
+        await callback.answer()
 
 @router.message(RefuseFSM.reason)
 async def process_refuse_reason(message: Message, state: FSMContext):
@@ -152,15 +172,24 @@ async def process_refuse_reason(message: Message, state: FSMContext):
     async for session in get_db():
         refusal = Refusal(request_id=request_id, installer_id=installer_id, reason=reason)
         session.add(refusal)
-        # Заявка остаётся new, можно обновить сообщение в группе (по желанию)
-        group_msg = await session.execute(select(GroupMessage).where(GroupMessage.request_id == request_id))
-        group_msg = group_msg.scalar_one()
-        await bot.edit_message_text(
-            chat_id=GROUP_ID,
-            message_id=group_msg.message_id,
-            text=message.reply_to_message.text + f"\n\n❌ Отказ от {message.from_user.full_name}: {reason}",
-            reply_markup=group_request_keyboard(request_id)  # оставляем кнопки для других
+        
+        # Обновляем сообщение в группе
+        group_msg = await session.execute(
+            select(GroupMessage).where(GroupMessage.request_id == request_id)
         )
+        group_msg = group_msg.scalar_one_or_none()
+        
+        if group_msg:
+            try:
+                await bot.edit_message_text(
+                    chat_id=GROUP_ID,
+                    message_id=group_msg.message_id,
+                    text=f"Заявка #{request_id}\n❌ Отказ от {message.from_user.full_name}: {reason}",
+                    reply_markup=group_request_keyboard(request_id)
+                )
+            except:
+                pass
+        
         await session.commit()
 
     await message.answer("Причина отказа записана.")
@@ -172,14 +201,19 @@ async def process_refuse_reason(message: Message, state: FSMContext):
 async def my_requests(message: Message):
     installer_tg_id = message.from_user.id
     async for session in get_db():
-        installer = await session.execute(select(User).where(User.telegram_id == installer_tg_id))
+        installer = await session.execute(
+            select(User).where(User.telegram_id == installer_tg_id)
+        )
         installer = installer.scalar_one_or_none()
         if not installer or installer.role != "installer":
             await message.answer("Эта команда только для монтажников.")
             return
 
         requests = await session.execute(
-            select(Request).where(Request.installer_id == installer.id, Request.status == "in_progress")
+            select(Request).where(
+                Request.installer_id == installer.id, 
+                Request.status == "in_progress"
+            )
         )
         requests = requests.scalars().all()
 
@@ -190,8 +224,10 @@ async def my_requests(message: Message):
         for req in requests:
             district = await session.get(District, req.district_id)
             text = f"Заявка #{req.id} - {district.name}\nАдрес: {req.address}"
-            # Кнопки с действиями
-            await message.answer(text, reply_markup=installer_request_actions(req.id, req.latitude is not None))
+            await message.answer(
+                text, 
+                reply_markup=installer_request_actions(req.id, req.latitude is not None)
+            )
 
 # Действия по кнопкам из ЛС
 @router.callback_query(F.data.startswith("map_"))
@@ -200,7 +236,6 @@ async def show_map(callback: CallbackQuery):
     async for session in get_db():
         request = await session.get(Request, request_id)
         if request and request.latitude and request.longitude:
-            # Отправляем ссылку на Яндекс.Карты
             yandex_url = f"https://yandex.ru/maps/?pt={request.longitude},{request.latitude}&z=17&l=map"
             await callback.message.answer(f"🗺 [Открыть на карте]({yandex_url})", parse_mode="Markdown")
         else:
@@ -222,32 +257,48 @@ async def call_phone(callback: CallbackQuery):
 async def complete_request(callback: CallbackQuery):
     request_id = int(callback.data.split("_")[1])
     installer_tg_id = callback.from_user.id
+    
     async for session in get_db():
-        installer = await session.execute(select(User).where(User.telegram_id == installer_tg_id))
+        installer = await session.execute(
+            select(User).where(User.telegram_id == installer_tg_id)
+        )
         installer = installer.scalar_one()
+        
         request = await session.get(Request, request_id)
         if not request or request.installer_id != installer.id or request.status != "in_progress":
             await callback.answer("Ошибка: заявка не в работе у вас.", show_alert=True)
             return
 
         request.status = "completed"
-        request.completed_at = func.now()
+        request.completed_at = datetime.now()
         await session.commit()
 
         # Уведомляем заказчика
         customer = await session.get(User, request.customer_id)
-        await bot.send_message(customer.telegram_id, f"Заявка №{request.id} выполнена монтажником {installer.name}.")
+        await bot.send_message(
+            customer.telegram_id, 
+            f"✅ Заявка №{request.id} выполнена монтажником {installer.name}."
+        )
 
-        # Редактируем сообщение в группе, если оно есть
-        group_msg = await session.execute(select(GroupMessage).where(GroupMessage.request_id == request_id))
+        # Редактируем сообщение в группе
+        group_msg = await session.execute(
+            select(GroupMessage).where(GroupMessage.request_id == request_id)
+        )
         group_msg = group_msg.scalar_one_or_none()
+        
         if group_msg:
-            await bot.edit_message_text(
-                chat_id=GROUP_ID,
-                message_id=group_msg.message_id,
-                text=callback.message.text + "\n\n✅ Заявка выполнена.",
-                reply_markup=None
-            )
+            try:
+                await bot.edit_message_text(
+                    chat_id=GROUP_ID,
+                    message_id=group_msg.message_id,
+                    text=f"Заявка #{request_id}\n✅ Выполнена монтажником {installer.name}",
+                    reply_markup=None
+                )
+            except:
+                pass
 
-        await callback.message.edit_text(callback.message.text + "\n\n✅ Заявка завершена.")
+        await callback.message.edit_text(
+            callback.message.text + "\n\n✅ Заявка завершена."
+        )
+    
     await callback.answer()
