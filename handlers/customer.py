@@ -1,16 +1,15 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, ContentType
-from aiogram.filters import Command, StateFilter
+from aiogram.types import Message, CallbackQuery, ContentType, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
-from models import User, District, Request, GroupMessage
+from models import User, District, Request
 from keyboards import cancel_keyboard, geo_keyboard, districts_keyboard
-from utils import reverse_geocode, format_request_for_group, logger
+from utils import reverse_geocode, logger
 from config import GROUP_ID
-from handlers.installer import send_request_to_group
 import json
 
 router = Router()
@@ -19,6 +18,7 @@ class RequestFSM(StatesGroup):
     description = State()
     photos = State()
     address = State()
+    address_manual = State()  # Добавлено недостающее состояние
     phone = State()
     district = State()
 
@@ -61,10 +61,11 @@ async def process_location(message: Message, state: FSMContext):
     address = await reverse_geocode(lat, lon)
     if address:
         await state.update_data(address=address, latitude=lat, longitude=lon)
-        await message.answer(f"Распознан адрес: {address}\nВерно?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Да", callback_data="addr_confirm")],
-            [InlineKeyboardButton(text="Нет, ввести вручную", callback_data="addr_manual")]
-        ]))
+        await message.answer(f"Распознан адрес: {address}\nВерно?", 
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="Да", callback_data="addr_confirm")],
+                                 [InlineKeyboardButton(text="Нет, ввести вручную", callback_data="addr_manual")]
+                             ]))
     else:
         await message.answer("Не удалось распознать адрес. Введите вручную:")
         await state.set_state(RequestFSM.address_manual)
@@ -72,13 +73,15 @@ async def process_location(message: Message, state: FSMContext):
 @router.callback_query(F.data == "addr_confirm")
 async def addr_confirm(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RequestFSM.phone)
-    await callback.message.edit_text("Введите номер телефона для связи:")
+    await callback.message.delete()
+    await callback.message.answer("Введите номер телефона для связи:")
     await callback.answer()
 
 @router.callback_query(F.data == "addr_manual")
 async def addr_manual(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RequestFSM.address_manual)
-    await callback.message.edit_text("Введите адрес вручную:")
+    await callback.message.delete()
+    await callback.message.answer("Введите адрес вручную:")
     await callback.answer()
 
 @router.message(RequestFSM.address_manual)
@@ -95,13 +98,6 @@ async def process_phone(message: Message, state: FSMContext):
     async for session in get_db():
         districts = await session.execute(select(District))
         districts = districts.scalars().all()
-        if not districts:
-            # Если районов нет, создадим пару для примера
-            districts = [District(name="Центральный"), District(name="Северный")]
-            session.add_all(districts)
-            await session.commit()
-            districts = await session.execute(select(District))
-            districts = districts.scalars().all()
     await state.set_state(RequestFSM.district)
     await message.answer("Выберите район:", reply_markup=districts_keyboard(districts))
 
@@ -109,13 +105,16 @@ async def process_phone(message: Message, state: FSMContext):
 async def process_district(callback: CallbackQuery, state: FSMContext):
     district_id = int(callback.data.split("_")[1])
     data = await state.get_data()
+    
     async for session in get_db():
         # Получаем заказчика
         user = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
         user = user.scalar_one()
+        
         # Создаём заявку
         photos = data.get("photos", [])
         photos_str = json.dumps(photos) if photos else None
+        
         request = Request(
             customer_id=user.id,
             description=data["description"],
@@ -132,8 +131,9 @@ async def process_district(callback: CallbackQuery, state: FSMContext):
         await session.refresh(request)
 
         # Отправляем в группу
+        from handlers.installer import send_request_to_group
         await send_request_to_group(request.id, session)
 
-    await callback.message.edit_text("Заявка создана и отправлена монтажникам!")
+    await callback.message.edit_text("✅ Заявка создана и отправлена монтажникам!")
     await state.clear()
     await callback.answer()
