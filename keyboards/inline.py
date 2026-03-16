@@ -24,20 +24,16 @@ def get_role_keyboard() -> InlineKeyboardMarkup:
 
 def get_district_keyboard() -> InlineKeyboardMarkup:
     """
-    Клавиатура выбора района - ИСПРАВЛЕНО
+    Клавиатура выбора района
     """
     builder = InlineKeyboardBuilder()
     
-    # Добавляем кнопки для каждого района
     for district in DISTRICTS:
-        # Важно: используем простые callback_data без пробелов и спецсимволов
-        callback_data = f"district_{district.replace(' ', '_').replace('-', '_').replace('.', '_')}"
         builder.add(InlineKeyboardButton(
             text=district,
-            callback_data=callback_data
+            callback_data=f"district_{district}"
         ))
     
-    # Располагаем кнопки в 2 колонки
     builder.adjust(2)
     
     return builder.as_markup()
@@ -70,7 +66,7 @@ def get_installer_request_keyboard(request_id: int, has_coords: bool = False) ->
     if has_coords:
         builder.add(InlineKeyboardButton(
             text="🗺 Открыть на карте",
-            callback_data=f"map_{request_id}"
+            url=f"https://yandex.ru/maps/?pt={request_id}"  # Здесь будет реальная логика
         ))
     
     builder.add(InlineKeyboardButton(

@@ -1,15 +1,9 @@
 import os
 from typing import Final, List
 from dotenv import load_dotenv
-import logging
-
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
-logger.info("Загрузка .env файла...")
 
 # Проверка наличия обязательных переменных
 BOT_TOKEN: Final[str] = os.getenv('BOT_TOKEN')
@@ -18,15 +12,11 @@ if not BOT_TOKEN:
 
 try:
     ADMIN_ID: Final[int] = int(os.getenv('ADMIN_ID', 0))
-    if ADMIN_ID == 0:
-        logger.warning("ADMIN_ID не установлен или равен 0")
 except ValueError:
     raise ValueError("ADMIN_ID должен быть числом")
 
 try:
     GROUP_ID: Final[int] = int(os.getenv('GROUP_ID', 0))
-    if GROUP_ID == 0:
-        logger.warning("GROUP_ID не установлен или равен 0")
 except ValueError:
     raise ValueError("GROUP_ID должен быть числом")
 
@@ -34,19 +24,18 @@ GEOCODER_API_KEY: Final[str] = os.getenv('GEOCODER_API_KEY', '')
 
 DATABASE_URL: Final[str] = os.getenv('DATABASE_URL', 'sqlite+aiosqlite:///montage_bot.db')
 
-# СПИСОК РАЙОНОВ - исправленный под ваши требования
+# Список районов города
 DISTRICTS: Final[List[str]] = [
-    "Центр",
-    "Шишковка", 
+    "Центральный",
+    "Северный",
+    "Северо-Западный",
+    "Северо-Восточный",
+    "Южный",
+    "Юго-Западный",
+    "Юго-Восточный",
+    "Западный",
     "Восточный",
-    "Верхняя Березовка",
-    "100-е квартала",
-    "Восточные ворота",
-    "Комушка",
-    "Вахмистрово",
-    "Зверосовхоз",
-    "Южлаг",
-    "Другой"
+    "Пригородный"
 ]
 
 # Константы для статусов заявок
@@ -62,7 +51,3 @@ ROLE_INSTALLER: Final[str] = "installer"
 # Логирование
 LOG_FORMAT: Final[str] = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_LEVEL: Final[str] = "INFO"
-
-logger.info(f"Конфигурация загружена. BOT_TOKEN: {'установлен' if BOT_TOKEN else 'не установлен'}")
-logger.info(f"ADMIN_ID: {ADMIN_ID}, GROUP_ID: {GROUP_ID}")
-logger.info(f"Районов в системе: {len(DISTRICTS)}")
