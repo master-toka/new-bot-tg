@@ -49,6 +49,7 @@ class GeocoderService:
                         address = self._parse_response(data)
                         
                         if address:
+                            # Сохраняем в кэш
                             await self._save_to_cache(lat, lon, address)
                             return address
                     else:
@@ -128,6 +129,7 @@ class GeocoderService:
         Получение адреса из кэша
         """
         try:
+            # Округляем координаты для поиска в кэше
             lat_rounded = round(lat, 6)
             lon_rounded = round(lon, 6)
             
@@ -149,6 +151,7 @@ class GeocoderService:
         Сохранение адреса в кэш
         """
         try:
+            # Округляем координаты для сохранения
             lat_rounded = round(lat, 6)
             lon_rounded = round(lon, 6)
             

@@ -13,8 +13,7 @@ try:
     engine = create_async_engine(
         DATABASE_URL,
         echo=True,
-        future=True,
-        pool_pre_ping=True
+        future=True
     )
     logger.info(f"Database engine created for {DATABASE_URL}")
 except Exception as e:
@@ -25,9 +24,7 @@ except Exception as e:
 AsyncSessionLocal = async_sessionmaker(
     engine,
     class_=AsyncSession,
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False
+    expire_on_commit=False
 )
 
 # Базовый класс для моделей
@@ -38,18 +35,11 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
     Dependency function для получения сессии базы данных
     """
-    session = AsyncSessionLocal()
-    try:
-        logger.debug("Creating new database session")
-        yield session
-        await session.commit()
-    except Exception as e:
-        logger.error(f"Session error, rolling back: {e}")
-        await session.rollback()
-        raise
-    finally:
-        logger.debug("Closing session")
-        await session.close()
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
 
 # Функция для создания таблиц
 async def init_db():
@@ -63,14 +53,3 @@ async def init_db():
     except Exception as e:
         logger.error(f"Failed to create database tables: {e}")
         raise
-
-# Функция для закрытия соединений
-async def close_db():
-    """
-    Закрытие всех соединений с базой данных
-    """
-    try:
-        await engine.dispose()
-        logger.info("Database connections closed")
-    except Exception as e:
-        logger.error(f"Error closing database connections: {e}")

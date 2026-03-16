@@ -2,6 +2,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, ContentType
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 import logging
 import json
@@ -19,9 +20,8 @@ from keyboards.reply import (
 from keyboards.inline import get_district_keyboard
 from services.geocoder import GeocoderService
 from services.notifications import NotificationService
-from utils.helpers import json_serialize_photos, validate_phone, format_phone
+from utils.helpers import json_serialize_photos, validate_phone
 from config import GROUP_ID
-from utils.db_helper import with_session
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +29,17 @@ router = Router()
 
 @router.message(Command("new_request"))
 @router.message(F.text == "📝 Новая заявка")
-@with_session
-async def cmd_new_request(message: Message, state: FSMContext, session):
+async def cmd_new_request(message: Message, state: FSMContext, session: AsyncSession = None):
     """
     Начало создания новой заявки
     """
     try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
         # Проверяем, что пользователь - заказчик
         query = select(User).where(User.telegram_id == message.from_user.id)
         result = await session.execute(query)
@@ -95,13 +100,22 @@ async def process_photos(message: Message, state: FSMContext):
     photos = data.get('photos', [])
     
     if message.text == "✅ Готово":
-        # Переходим к вводу адреса
-        await state.update_data(photos=photos)
-        await state.set_state(RequestStates.waiting_address)
-        await message.answer(
-            "📍 Отправьте геолокацию или введите адрес вручную:",
-            reply_markup=get_location_keyboard()
-        )
+        if photos:
+            # Переходим к вводу адреса
+            await state.update_data(photos=photos)
+            await state.set_state(RequestStates.waiting_address)
+            await message.answer(
+                "📍 Отправьте геолокацию или введите адрес вручную:",
+                reply_markup=get_location_keyboard()
+            )
+        else:
+            # Можно пропустить фото
+            await state.update_data(photos=[])
+            await state.set_state(RequestStates.waiting_address)
+            await message.answer(
+                "📍 Отправьте геолокацию или введите адрес вручную:",
+                reply_markup=get_location_keyboard()
+            )
     
     elif message.text == "⬅️ Отмена":
         await state.clear()
@@ -114,12 +128,17 @@ async def process_photos(message: Message, state: FSMContext):
         await message.answer(f"✅ Фото добавлено. Всего: {len(photos)}. Можете добавить еще или нажать '✅ Готово'.")
 
 @router.message(RequestStates.waiting_address, F.content_type == ContentType.LOCATION)
-@with_session
-async def process_location(message: Message, state: FSMContext, session):
+async def process_location(message: Message, state: FSMContext, session: AsyncSession = None):
     """
     Обработка геолокации
     """
     try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
         location = message.location
         lat, lon = location.latitude, location.longitude
         
@@ -153,9 +172,9 @@ async def process_location(message: Message, state: FSMContext, session):
         await state.set_state(RequestStates.waiting_address_manual)
 
 @router.message(RequestStates.waiting_address, F.text)
-async def process_manual_address_choice(message: Message, state: FSMContext):
+async def process_manual_address(message: Message, state: FSMContext):
     """
-    Обработка выбора ручного ввода адреса
+    Обработка ручного ввода адреса
     """
     if message.text == "⬅️ Отмена":
         await state.clear()
@@ -194,7 +213,7 @@ async def process_manual_address_input(message: Message, state: FSMContext):
     )
 
 @router.message(RequestStates.waiting_phone)
-async def process_phone(message: Message, state: FSMContext):
+async def process_phone(message: Message, state: FSMContext, session: AsyncSession = None):
     """
     Обработка номера телефона
     """
@@ -223,14 +242,18 @@ async def process_phone(message: Message, state: FSMContext):
     )
 
 @router.callback_query(StateFilter(RequestStates.waiting_district), F.data.startswith("district_"))
-@with_session
-async def process_district(callback: CallbackQuery, state: FSMContext, session):
+async def process_district(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     """
     Обработка выбора района и создание заявки
     """
     try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
         district_name = callback.data.replace("district_", "")
-        logger.info(f"Выбран район: {district_name}")
         
         # Получаем район из БД
         query = select(District).where(District.name == district_name)
@@ -238,20 +261,11 @@ async def process_district(callback: CallbackQuery, state: FSMContext, session):
         district = result.scalar_one_or_none()
         
         if not district:
-            logger.error(f"Район не найден в БД: {district_name}")
-            await callback.answer("❌ Район не найден в системе")
+            await callback.answer("Район не найден")
             return
         
         # Получаем все данные из состояния
         data = await state.get_data()
-        
-        # Проверяем наличие обязательных полей
-        required_fields = ['description', 'address', 'phone']
-        for field in required_fields:
-            if field not in data:
-                await callback.answer(f"❌ Отсутствует поле: {field}")
-                await state.clear()
-                return
         
         # Получаем пользователя
         query = select(User).where(User.telegram_id == callback.from_user.id)
@@ -259,7 +273,7 @@ async def process_district(callback: CallbackQuery, state: FSMContext, session):
         user = result.scalar_one_or_none()
         
         if not user:
-            await callback.answer("❌ Пользователь не найден")
+            await callback.answer("Пользователь не найден")
             return
         
         # Создаем заявку
@@ -303,27 +317,26 @@ async def process_district(callback: CallbackQuery, state: FSMContext, session):
             reply_markup=None
         )
         
-        # Возвращаем основную клавиатуру
-        await callback.message.answer(
-            "Вы можете создать новую заявку или посмотреть статус существующих.",
-            reply_markup=get_customer_main_keyboard()
-        )
-        
-        await callback.answer("✅ Заявка создана!")
+        await callback.answer()
         
     except Exception as e:
         logger.error(f"Ошибка при создании заявки: {e}")
-        await callback.answer("❌ Ошибка при создании заявки")
+        await callback.answer("Ошибка при создании заявки")
         await session.rollback()
 
 @router.message(Command("my_requests"))
 @router.message(F.text == "📋 Мои заявки")
-@with_session
-async def cmd_my_requests(message: Message, session):
+async def cmd_my_requests(message: Message, session: AsyncSession = None):
     """
     Просмотр заявок заказчика
     """
     try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
         # Получаем пользователя
         query = select(User).where(User.telegram_id == message.from_user.id)
         result = await session.execute(query)
@@ -335,9 +348,9 @@ async def cmd_my_requests(message: Message, session):
         
         # Проверяем роль пользователя
         if user.role == UserRole.INSTALLER:
-            # Если это монтажник, перенаправляем
+            # Если это монтажник, перенаправляем на его обработчик
             from handlers.installer import cmd_my_requests as installer_my_requests
-            await installer_my_requests(message)
+            await installer_my_requests(message, session)
             return
         
         # Получаем все заявки заказчика
@@ -367,7 +380,7 @@ async def cmd_my_requests(message: Message, session):
         # Отправляем список заявок
         text = "📋 <b>Ваши заявки:</b>\n\n"
         
-        for req in requests[:10]:
+        for req in requests[:10]:  # Показываем последние 10 заявок
             status_text = status_names.get(req.status.value, req.status.value)
             text += f"🔨 <b>Заявка #{req.id}</b> - {status_text}\n"
             text += f"📍 Адрес: {req.address[:50]}{'...' if len(req.address) > 50 else ''}\n"
@@ -393,12 +406,17 @@ async def cmd_my_requests(message: Message, session):
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 @router.message(Command("request"))
-@with_session
-async def cmd_request_detail(message: Message, session):
+async def cmd_request_detail(message: Message, session: AsyncSession = None):
     """
     Просмотр деталей конкретной заявки
     """
     try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
         # Получаем номер заявки из команды
         parts = message.text.split()
         if len(parts) != 2:
@@ -451,7 +469,7 @@ async def cmd_request_detail(message: Message, session):
         text += f"<b>Описание:</b>\n{request.description}\n\n"
         text += f"<b>Адрес:</b> {request.address}\n"
         text += f"<b>Район:</b> {request.district.name}\n"
-        text += f"<b>Телефон:</b> {format_phone(request.phone)}\n"
+        text += f"<b>Телефон:</b> {request.phone}\n"
         text += f"\n<b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}\n"
         
         if request.taken_at:
@@ -462,6 +480,8 @@ async def cmd_request_detail(message: Message, session):
         
         if request.installer:
             text += f"\n<b>Монтажник:</b> {request.installer.first_name or request.installer.username}"
+            if request.installer.phone:
+                text += f"\n<b>Телефон монтажника:</b> {request.installer.phone}"
         
         await message.answer(text, parse_mode="HTML")
         
@@ -471,7 +491,7 @@ async def cmd_request_detail(message: Message, session):
                 photos = json.loads(request.photos)
                 if photos:
                     await message.answer("📸 <b>Фото заявки:</b>", parse_mode="HTML")
-                    for photo in photos[:5]:
+                    for photo in photos[:5]:  # Отправляем не больше 5 фото
                         await message.answer_photo(photo)
             except json.JSONDecodeError:
                 logger.error(f"Ошибка парсинга фото для заявки {request.id}")
@@ -493,3 +513,33 @@ async def cmd_cancel(message: Message, state: FSMContext):
     
     await state.clear()
     await message.answer("Действие отменено.", reply_markup=get_customer_main_keyboard())
+
+@router.message(Command("help"))
+@router.message(F.text == "ℹ️ Помощь")
+async def cmd_help(message: Message):
+    """
+    Справка для заказчика
+    """
+    help_text = """
+<b>🔧 Помощь для заказчика</b>
+
+<b>Доступные команды:</b>
+• 📝 Новая заявка - создать заявку на монтаж
+• 📋 Мои заявки - посмотреть список ваших заявок
+• /request [номер] - посмотреть детали конкретной заявки
+• ℹ️ Помощь - показать это сообщение
+
+<b>Как создать заявку:</b>
+1. Нажмите "📝 Новая заявка"
+2. Опишите работы подробно
+3. Приложите фото (можно несколько)
+4. Укажите адрес (геолокация или вручную)
+5. Введите номер телефона
+6. Выберите район
+
+После создания заявки монтажники увидят её в общем чате и смогут взять в работу. Вы получите уведомление, когда заявка будет принята.
+
+По вопросам: @admin
+    """
+    
+    await message.answer(help_text, parse_mode="HTML", reply_markup=get_customer_main_keyboard())

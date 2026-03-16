@@ -10,6 +10,7 @@ class RequestStates(StatesGroup):
     waiting_address_manual = State()
     waiting_phone = State()
     waiting_district = State()
+    confirming_location = State()
 
 class RefusalStates(StatesGroup):
     """

@@ -1,17 +1,17 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import logging
 from datetime import datetime, timedelta
 
-from models import User, District
+from database import get_db
+from models import User
 from keyboards.inline import get_admin_menu_keyboard, get_back_keyboard
 from keyboards.reply import get_admin_main_keyboard
 from services.statistics import StatisticsService
-from utils.init_districts import check_districts, init_districts
 from config import ADMIN_ID
-from utils.db_helper import with_session
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +35,17 @@ async def cmd_admin(message: Message):
     )
 
 @router.callback_query(F.data.startswith("admin_stats_"))
-@with_session
-async def process_admin_stats(callback: CallbackQuery, session):
+async def process_admin_stats(callback: CallbackQuery, session: AsyncSession = None):
     """
     Обработка запросов статистики
     """
     try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
         stats_type = callback.data.replace("admin_stats_", "")
         stats_service = StatisticsService(session)
         
@@ -58,56 +63,6 @@ async def process_admin_stats(callback: CallbackQuery, session):
     except Exception as e:
         logger.error(f"Ошибка в админ-панели: {e}")
         await callback.answer("Ошибка при получении статистики")
-
-@router.callback_query(F.data == "admin_check_districts")
-@with_session
-async def admin_check_districts(callback: CallbackQuery, session):
-    """
-    Проверка районов в БД
-    """
-    try:
-        result = await check_districts(session)
-        
-        text = "🏘 <b>Проверка районов</b>\n\n"
-        text += f"Всего в БД: {result['count']}\n\n"
-        
-        if result['districts']:
-            text += "📋 <b>Существующие районы:</b>\n"
-            for d in result['districts']:
-                text += f"• {d['name']} (ID: {d['id']})\n"
-        
-        if result['missing']:
-            text += f"\n⚠️ <b>Отсутствуют ({len(result['missing'])}):</b>\n"
-            for d in result['missing']:
-                text += f"• {d}\n"
-            
-            text += "\nДля добавления используйте /init_districts"
-        else:
-            text += "\n✅ Все районы присутствуют в БД!"
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_back_keyboard(),
-            parse_mode="HTML"
-        )
-        await callback.answer()
-        
-    except Exception as e:
-        logger.error(f"Ошибка при проверке районов: {e}")
-        await callback.answer("❌ Ошибка")
-
-@router.message(Command("init_districts"))
-@with_session
-async def cmd_init_districts(message: Message, session):
-    """
-    Принудительная инициализация районов
-    """
-    try:
-        await init_districts(session)
-        await message.answer("✅ Районы успешно инициализированы!")
-    except Exception as e:
-        logger.error(f"Ошибка при инициализации районов: {e}")
-        await message.answer(f"❌ Ошибка: {e}")
 
 @router.callback_query(F.data == "admin_back")
 async def admin_back(callback: CallbackQuery):
@@ -206,7 +161,7 @@ async def show_installer_stats(callback: CallbackQuery, stats_service: Statistic
     
     text = "👥 <b>Рейтинг монтажников</b>\n\n"
     
-    for i, item in enumerate(stats[:10], 1):
+    for i, item in enumerate(stats, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
         text += f"{medal} <b>{item['name']}</b>\n"
         text += f"• Выполнено: {item['completed']}\n"
@@ -265,10 +220,10 @@ async def show_refusal_stats(callback: CallbackQuery, stats_service: StatisticsS
     
     text = "❌ <b>Отказы за последние 30 дней</b>\n\n"
     
-    for item in stats[:10]:
+    for item in stats[:10]:  # Показываем последние 10 отказов
         text += f"<b>Заявка #{item['request_id']}</b>\n"
         text += f"Монтажник: {item['installer_name']}\n"
-        text += f"Причина: {item['reason'][:50]}{'...' if len(item['reason']) > 50 else ''}\n"
+        text += f"Причина: {item['reason']}\n"
         text += f"Дата: {item['date']}\n"
         text += "➖➖➖➖➖➖➖\n"
     

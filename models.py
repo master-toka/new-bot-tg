@@ -5,6 +5,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
+from datetime import datetime
 
 from database import Base
 from config import (
@@ -42,6 +43,9 @@ class User(Base):
     customer_requests = relationship("Request", foreign_keys="Request.customer_id", back_populates="customer")
     installer_requests = relationship("Request", foreign_keys="Request.installer_id", back_populates="installer")
     refusals = relationship("Refusal", back_populates="installer")
+    
+    def __repr__(self):
+        return f"<User(id={self.id}, telegram_id={self.telegram_id}, role={self.role})>"
 
 class District(Base):
     __tablename__ = 'districts'
@@ -53,6 +57,9 @@ class District(Base):
     
     # Relationships
     requests = relationship("Request", back_populates="district")
+    
+    def __repr__(self):
+        return f"<District(id={self.id}, name={self.name})>"
 
 class Request(Base):
     __tablename__ = 'requests'
@@ -63,7 +70,7 @@ class Request(Base):
     district_id = Column(Integer, ForeignKey('districts.id'), nullable=False)
     
     description = Column(Text, nullable=False)
-    photos = Column(Text, nullable=True)
+    photos = Column(Text, nullable=True)  # JSON строка с file_id фото
     address = Column(String(500), nullable=False)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
@@ -90,6 +97,9 @@ class Request(Base):
         Index('idx_requests_installer', 'installer_id'),
         Index('idx_requests_created', 'created_at'),
     )
+    
+    def __repr__(self):
+        return f"<Request(id={self.id}, status={self.status}, customer_id={self.customer_id})>"
 
 class GroupMessage(Base):
     __tablename__ = 'group_messages'
@@ -106,6 +116,9 @@ class GroupMessage(Base):
     __table_args__ = (
         Index('idx_group_messages_request', 'request_id'),
     )
+    
+    def __repr__(self):
+        return f"<GroupMessage(request_id={self.request_id}, message_id={self.message_id})>"
 
 class Refusal(Base):
     __tablename__ = 'refusals'
@@ -119,6 +132,9 @@ class Refusal(Base):
     # Relationships
     request = relationship("Request", back_populates="refusals")
     installer = relationship("User", foreign_keys=[installer_id], back_populates="refusals")
+    
+    def __repr__(self):
+        return f"<Refusal(request_id={self.request_id}, installer_id={self.installer_id})>"
 
 class GeocodeCache(Base):
     __tablename__ = 'geocode_cache'
@@ -132,3 +148,6 @@ class GeocodeCache(Base):
     __table_args__ = (
         Index('idx_geocode_coords', 'latitude', 'longitude', unique=True),
     )
+    
+    def __repr__(self):
+        return f"<GeocodeCache(lat={self.latitude}, lon={self.longitude})>"

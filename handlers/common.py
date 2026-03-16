@@ -1,7 +1,9 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandStart
-from sqlalchemy import select
+from aiogram.fsm.context import FSMContext
+from sqlalchemy.ext.asyncio import AsyncSession
+import logging
 
 from database import get_db
 from models import User, UserRole
@@ -12,25 +14,32 @@ from keyboards.reply import (
 )
 from keyboards.inline import get_role_keyboard
 from config import ADMIN_ID
-from utils.db_helper import with_session
-
-import logging
 
 logger = logging.getLogger(__name__)
 
+# Создаем роутер
 router = Router()
 
 @router.message(CommandStart())
-@with_session
-async def cmd_start(message: Message, session):
+async def cmd_start(message: Message, session: AsyncSession = None):
     """
     Обработчик команды /start
     """
     try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
         # Проверяем, существует ли пользователь
-        query = select(User).where(User.telegram_id == message.from_user.id)
-        result = await session.execute(query)
-        user = result.scalar_one_or_none()
+        user = await session.get(User, message.from_user.id)
+        if not user:
+            # Ищем пользователя по telegram_id
+            from sqlalchemy import select
+            query = select(User).where(User.telegram_id == message.from_user.id)
+            result = await session.execute(query)
+            user = result.scalar_one_or_none()
         
         if user:
             # Пользователь уже зарегистрирован
@@ -47,12 +56,17 @@ async def cmd_start(message: Message, session):
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
 @router.callback_query(F.data.startswith("role_"))
-@with_session
-async def process_role_selection(callback: CallbackQuery, session):
+async def process_role_selection(callback: CallbackQuery, session: AsyncSession = None):
     """
     Обработка выбора роли
     """
     try:
+        # Получаем сессию БД если не передана
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+        
         role = callback.data.replace("role_", "")
         
         # Определяем роль
@@ -79,7 +93,7 @@ async def process_role_selection(callback: CallbackQuery, session):
         session.add(new_user)
         await session.commit()
         
-        await callback.answer("✅ Регистрация успешна!")
+        await callback.answer("Регистрация успешна!")
         
         # Отправляем соответствующее меню
         await send_role_menu(callback.message, new_user)
@@ -89,12 +103,12 @@ async def process_role_selection(callback: CallbackQuery, session):
         
     except Exception as e:
         logger.error(f"Ошибка в process_role_selection: {e}")
-        await callback.answer("❌ Ошибка при регистрации")
+        await callback.answer("Ошибка при регистрации")
         await session.rollback()
 
 @router.message(Command("help"))
 @router.message(F.text == "ℹ️ Помощь")
-async def cmd_help(message: Message):
+async def cmd_help(message: Message, session: AsyncSession = None):
     """
     Обработчик команды /help
     """
@@ -104,11 +118,9 @@ async def cmd_help(message: Message):
 <b>Для заказчиков:</b>
 • 📝 Новая заявка - создать заявку на монтаж
 • 📋 Мои заявки - посмотреть статус ваших заявок
-• /request [номер] - детали конкретной заявки
 
 <b>Для монтажников:</b>
 • 📋 Мои заявки - список взятых заявок
-• 📊 Моя статистика - личная статистика
 • В группе можно брать или отказываться от заявок
 
 <b>Общее:</b>
