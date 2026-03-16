@@ -48,3 +48,20 @@ async def init_districts(session: AsyncSession):
         logger.error(f"Ошибка при инициализации районов: {e}")
         await session.rollback()
         raise
+
+async def check_districts(session: AsyncSession) -> dict:
+    """
+    Проверка наличия районов в БД
+    """
+    try:
+        result = await session.execute(select(District).order_by(District.name))
+        districts = result.scalars().all()
+        
+        return {
+            "count": len(districts),
+            "districts": [{"id": d.id, "name": d.name, "is_active": d.is_active} for d in districts],
+            "missing": [d for d in DISTRICTS if d not in [dist.name for dist in districts]]
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при проверке районов: {e}")
+        return {"count": 0, "districts": [], "missing": DISTRICTS}
