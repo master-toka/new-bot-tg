@@ -1,12 +1,13 @@
 from aiogram import Bot
-from aiogram.types import Message, InputMediaPhoto
+from aiogram.types import InputMediaPhoto
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
-from typing import List, Optional, Union
 import json
+from typing import List
 
 from models import Request, User
 from keyboards.inline import get_request_action_keyboard, get_installer_request_keyboard
+from utils.helpers import format_phone
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +38,6 @@ class NotificationService:
             
             # Отправляем фото и текст
             if photos:
-                # Отправляем первое фото с кнопками
-                media = InputMediaPhoto(
-                    media=photos[0],
-                    caption=text
-                )
-                
                 sent_message = await self.bot.send_photo(
                     chat_id=group_id,
                     photo=photos[0],
@@ -57,7 +52,6 @@ class NotificationService:
                         photo=photo
                     )
             else:
-                # Если фото нет, отправляем только текст
                 sent_message = await self.bot.send_message(
                     chat_id=group_id,
                     text=text,
@@ -134,7 +128,8 @@ class NotificationService:
         try:
             await self.bot.send_message(
                 chat_id=customer_id,
-                text=text
+                text=text,
+                parse_mode="HTML"
             )
             logger.info(f"Уведомление отправлено заказчику {customer_id}")
         except Exception as e:
@@ -142,7 +137,7 @@ class NotificationService:
     
     async def update_group_message(self, group_id: int, message_id: int, request: Request):
         """
-        Обновление сообщения в группе (после взятия/отказа)
+        Обновление сообщения в группе
         """
         try:
             # Формируем новый текст
@@ -150,13 +145,18 @@ class NotificationService:
             
             # Добавляем информацию о монтажнике если заявка взята
             if request.status.value == "in_progress" and request.installer:
-                text += f"\n\n👤 Взял: {request.installer.first_name or request.installer.username}"
+                installer_name = request.installer.first_name or request.installer.username or "Монтажник"
+                text += f"\n\n👤 Взял: {installer_name}"
+            elif request.status.value == "completed":
+                text += f"\n\n✅ Заявка выполнена!"
             
             # Обновляем сообщение, убираем кнопки
             await self.bot.edit_message_text(
                 chat_id=group_id,
                 message_id=message_id,
-                text=text
+                text=text,
+                parse_mode="HTML",
+                reply_markup=None
             )
             
             logger.info(f"Сообщение в группе обновлено для заявки {request.id}")
@@ -171,7 +171,7 @@ class NotificationService:
         text = f"🔨 <b>Заявка #{request.id}</b>\n\n"
         text += f"📝 <b>Описание:</b>\n{request.description}\n\n"
         text += f"📍 <b>Адрес:</b> {request.address}\n"
-        text += f"📞 <b>Телефон:</b> {request.phone}\n"
+        text += f"📞 <b>Телефон:</b> {format_phone(request.phone)}\n"
         text += f"🏘 <b>Район:</b> {request.district.name}\n"
         text += f"\n⏰ <b>Создана:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}"
         
@@ -184,7 +184,7 @@ class NotificationService:
         text = f"🔨 <b>Заявка #{request.id}</b>\n\n"
         text += f"📝 <b>Описание:</b>\n{request.description}\n\n"
         text += f"📍 <b>Адрес:</b> {request.address}\n"
-        text += f"📞 <b>Телефон клиента:</b> {request.phone}\n"
+        text += f"📞 <b>Телефон клиента:</b> {format_phone(request.phone)}\n"
         text += f"🏘 <b>Район:</b> {request.district.name}\n"
         text += f"\n📅 <b>Дата создания:</b> {request.created_at.strftime('%d.%m.%Y %H:%M')}"
         
