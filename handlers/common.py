@@ -1,9 +1,8 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from models import User
 from keyboards import customer_menu, installer_menu
@@ -51,6 +50,15 @@ async def set_role(callback: CallbackQuery, state: FSMContext):
     is_admin = (telegram_id == ADMIN_ID)
 
     async for session in get_db():
+        # Проверяем, не зарегистрирован ли уже пользователь
+        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        existing_user = result.scalar_one_or_none()
+        
+        if existing_user:
+            await callback.message.edit_text("Вы уже зарегистрированы.")
+            await callback.answer()
+            return
+
         user = User(
             telegram_id=telegram_id,
             role=role,
