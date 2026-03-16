@@ -3,7 +3,7 @@ from aiogram.types import Message, CallbackQuery, InputMediaPhoto
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select, update, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from models import User, Request, GroupMessage, Refusal, District
@@ -15,6 +15,7 @@ from datetime import datetime
 
 router = Router()
 bot = Bot(token=BOT_TOKEN)
+
 
 class RefuseFSM(StatesGroup):
     reason = State()
