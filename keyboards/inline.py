@@ -31,7 +31,7 @@ def get_district_keyboard() -> InlineKeyboardMarkup:
     # Добавляем кнопки для каждого района
     for district in DISTRICTS:
         # Важно: используем простые callback_data без пробелов и спецсимволов
-        callback_data = f"district_{district.replace(' ', '_').replace('-', '_')}"
+        callback_data = f"district_{district.replace(' ', '_').replace('-', '_').replace('.', '_')}"
         builder.add(InlineKeyboardButton(
             text=district,
             callback_data=callback_data
