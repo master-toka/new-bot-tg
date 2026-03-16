@@ -14,6 +14,7 @@ from aiogram.enums import ParseMode
 from config import BOT_TOKEN, LOG_FORMAT, LOG_LEVEL, ADMIN_ID, GROUP_ID
 from database import init_db, get_db
 from handlers import common, customer, installer, admin, group
+from utils.init_districts import init_districts
 
 # Настройка логирования
 logging.basicConfig(
@@ -56,6 +57,11 @@ async def on_startup(bot: Bot):
     try:
         await init_db()
         logger.info("База данных инициализирована")
+        
+        # Инициализация районов
+        await init_districts()
+        logger.info("Районы инициализированы")
+        
     except Exception as e:
         logger.error(f"Ошибка инициализации БД: {e}")
         raise
