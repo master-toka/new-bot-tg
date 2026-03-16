@@ -2,5 +2,5 @@ aiogram==3.10.0
 SQLAlchemy==2.0.31
 aiohttp==3.9.5
 python-dotenv==1.0.1
-asyncpg==0.29.0          # для PostgreSQL (опционально)
-aiosqlite==0.20.0        # для SQLite (если используете)
+asyncpg==0.29.0
+aiosqlite==0.20.0
