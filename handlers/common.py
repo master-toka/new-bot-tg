@@ -30,15 +30,22 @@ async def cmd_start(message: Message, state: FSMContext):
                 await message.answer("Вы в главном меню заказчика.", reply_markup=customer_menu())
             elif user.role == "installer":
                 await message.answer("Вы в главном меню монтажника.", reply_markup=installer_menu())
+            else:
+                await message.answer("Добро пожаловать! Ваша роль не определена.")
             return
 
         # Новый пользователь: предлагаем выбор роли
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="👤 Заказчик", callback_data="role_customer")],
+                [InlineKeyboardButton(text="🔧 Монтажник", callback_data="role_installer")]
+            ]
+        )
+        
         await message.answer(
-            "Добро пожаловать! Выберите вашу роль:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Заказчик", callback_data="role_customer")],
-                [InlineKeyboardButton(text="Монтажник", callback_data="role_installer")]
-            ])
+            "👋 Добро пожаловать!\n\n"
+            "Выберите вашу роль:",
+            reply_markup=keyboard
         )
 
 @router.callback_query(F.data.startswith("role_"))
@@ -69,9 +76,21 @@ async def set_role(callback: CallbackQuery, state: FSMContext):
         session.add(user)
         await session.commit()
 
-    await callback.message.edit_text(f"Вы зарегистрированы как {'заказчик' if role == 'customer' else 'монтажник'}.")
+    # Удаляем сообщение с выбором роли
+    await callback.message.delete()
+    
+    # Отправляем приветственное сообщение с соответствующим меню
     if role == "customer":
-        await callback.message.answer("Используйте меню для создания заявки.", reply_markup=customer_menu())
+        await callback.message.answer(
+            "✅ Вы успешно зарегистрированы как заказчик!\n\n"
+            "Теперь вы можете создавать заявки на монтажные работы.",
+            reply_markup=customer_menu()
+        )
     else:
-        await callback.message.answer("Используйте меню для просмотра заявок.", reply_markup=installer_menu())
+        await callback.message.answer(
+            "✅ Вы успешно зарегистрированы как монтажник!\n\n"
+            "Теперь вы можете просматривать и брать заявки.",
+            reply_markup=installer_menu()
+        )
+    
     await callback.answer()
