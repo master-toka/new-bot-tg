@@ -1,552 +1,513 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, ContentType
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_, update
 import logging
-import json
-import re
+from datetime import datetime
 
 from database import get_db
-from models import User, Request, District, GroupMessage, RequestStatus
-from states.customer_states import RequestStates
-from keyboards.reply import (
-    get_customer_main_keyboard,
-    get_cancel_keyboard, 
-    get_location_keyboard, 
-    get_done_keyboard,
-    remove_keyboard
-)
-from keyboards.inline import get_district_keyboard
-from services.geocoder import GeocoderService
+from models import User, Request, GroupMessage, Refusal, RequestStatus, UserRole
+from states.customer_states import RefusalStates
+from keyboards.reply import get_installer_main_keyboard, remove_keyboard
+from keyboards.inline import get_installer_request_keyboard
 from services.notifications import NotificationService
-from utils.helpers import json_serialize_photos, validate_phone
-from config import GROUP_ID, DISTRICTS
+from utils.helpers import extract_message_id
+from config import GROUP_ID
 
+# Настройка подробного логирования
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 router = Router()
 
-@router.message(Command("start"))
-async def cmd_start(message: Message, session: AsyncSession = None):
-    """
-    Обработчик команды /start
-    """
-    try:
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
-        # Проверяем, существует ли пользователь
-        from sqlalchemy import select
-        query = select(User).where(User.telegram_id == message.from_user.id)
-        result = await session.execute(query)
-        user = result.scalar_one_or_none()
-        
-        if user:
-            # Пользователь уже зарегистрирован
-            await send_role_menu(message, user)
-        else:
-            # Новый пользователь - предлагаем выбрать роль
-            from keyboards.inline import get_role_keyboard
-            await message.answer(
-                "👋 Добро пожаловать! Выберите вашу роль:",
-                reply_markup=get_role_keyboard()
-            )
-            
-    except Exception as e:
-        logger.error(f"Ошибка в cmd_start: {e}", exc_info=True)
-        await message.answer("Произошла ошибка. Попробуйте позже.")
-
-@router.message(Command("new_request"))
-@router.message(F.text == "📝 Новая заявка")
-async def cmd_new_request(message: Message, state: FSMContext, session: AsyncSession = None):
-    """
-    Начало создания новой заявки
-    """
-    try:
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
-        # Проверяем, что пользователь - заказчик
-        query = select(User).where(User.telegram_id == message.from_user.id)
-        result = await session.execute(query)
-        user = result.scalar_one_or_none()
-        
-        if not user:
-            await message.answer("❌ Вы не зарегистрированы. Используйте /start для регистрации.")
-            return
-        
-        if user.role.value != "customer":
-            await message.answer("❌ Эта функция доступна только заказчикам.")
-            return
-        
-        # Очищаем предыдущее состояние
-        await state.clear()
-        
-        # Начинаем новый запрос
-        await state.set_state(RequestStates.waiting_description)
-        await message.answer(
-            "📝 Опишите подробно, какие работы нужно выполнить:\n"
-            "(минимум 10 символов)",
-            reply_markup=get_cancel_keyboard()
-        )
-        
-        logger.info(f"Пользователь {message.from_user.id} начал создание заявки")
-        
-    except Exception as e:
-        logger.error(f"Ошибка в cmd_new_request: {e}", exc_info=True)
-        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
-
 @router.message(Command("my_requests"))
 @router.message(F.text == "📋 Мои заявки")
-async def cmd_customer_my_requests(message: Message, session: AsyncSession = None):
+async def cmd_my_requests(message: Message, session: AsyncSession = None):
     """
-    Просмотр заявок заказчика
+    Просмотр списка активных заявок монтажника
     """
     try:
+        logger.info(f"Монтажник {message.from_user.id} запросил список заявок")
+        
         if not session:
             async for db_session in get_db():
                 session = db_session
                 break
 
-        # Получаем пользователя
         query = select(User).where(User.telegram_id == message.from_user.id)
         result = await session.execute(query)
         user = result.scalar_one_or_none()
 
         if not user:
-            await message.answer("❌ Вы не зарегистрированы. Используйте /start.")
+            await message.answer("Пользователь не найден. Используйте /start для регистрации.")
             return
 
-        # Получаем все заявки этого заказчика
-        query = select(Request).where(Request.customer_id == user.id).order_by(Request.created_at.desc())
+        query = select(Request).where(
+            and_(
+                Request.installer_id == user.id,
+                Request.status == RequestStatus.IN_PROGRESS
+            )
+        ).order_by(Request.created_at.desc())
+
         result = await session.execute(query)
         requests = result.scalars().all()
 
         if not requests:
-            await message.answer("📭 У вас пока нет заявок.")
+            await message.answer("У вас нет активных заявок.")
             return
 
-        text = "📋 <b>Ваши заявки:</b>\n\n"
+        text = "📋 <b>Ваши активные заявки:</b>\n\n"
         for req in requests:
-            status_emoji = {
-                "new": "🆕",
-                "in_progress": "🔄",
-                "completed": "✅",
-                "cancelled": "❌"
-            }.get(req.status.value, "📌")
-            
-            taken_info = ""
-            if req.installer:
-                installer_name = req.installer.first_name or req.installer.username or "Монтажник"
-                taken_info = f" (взял: {installer_name})"
-            
-            text += f"{status_emoji} <b>Заявка #{req.id}</b> – {req.status.value}{taken_info}\n"
-            text += f"📍 {req.address[:50]}...\n"
-            text += f"📅 {req.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            text += f"🔨 Заявка #{req.id}\n"
+            text += f"📍 Адрес: {req.address[:50]}...\n"
+            text += f"📅 Взята: {req.taken_at.strftime('%d.%m.%Y %H:%M') if req.taken_at else 'Неизвестно'}\n"
             text += "➖➖➖➖➖➖➖\n"
 
         await message.answer(text, parse_mode="HTML")
 
+        # Отправляем детали каждой заявки
+        for req in requests:
+            await send_request_details(message, req, user, session)
+
     except Exception as e:
-        logger.error(f"Ошибка в cmd_customer_my_requests: {e}", exc_info=True)
-        await message.answer("❌ Произошла ошибка при получении заявок.")
+        logger.error(f"Ошибка в cmd_my_requests: {e}", exc_info=True)
+        await message.answer("Произошла ошибка. Попробуйте позже.")
 
-@router.message(RequestStates.waiting_description)
-async def process_description(message: Message, state: FSMContext):
+@router.callback_query(F.data.startswith("take_"))
+async def process_take_request(callback: CallbackQuery, session: AsyncSession = None):
     """
-    Обработка описания заявки
-    """
-    if message.text == "⬅️ Отмена":
-        await state.clear()
-        await message.answer("❌ Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
-        return
-    
-    if not message.text or len(message.text.strip()) < 10:
-        await message.answer("❌ Описание должно содержать не менее 10 символов. Попробуйте еще раз:")
-        return
-    
-    # Сохраняем описание
-    await state.update_data(description=message.text.strip())
-    
-    # Переходим к загрузке фото
-    await state.set_state(RequestStates.waiting_photos)
-    await message.answer(
-        "📸 Отправьте фотографии (можно несколько). Когда закончите, нажмите '✅ Готово':\n"
-        "(можно пропустить, нажав '✅ Готово' сразу)",
-        reply_markup=get_done_keyboard()
-    )
-
-@router.message(RequestStates.waiting_photos, F.content_type.in_({ContentType.PHOTO, ContentType.TEXT}))
-async def process_photos(message: Message, state: FSMContext):
-    """
-    Обработка загрузки фото
-    """
-    data = await state.get_data()
-    photos = data.get('photos', [])
-    
-    if message.text == "✅ Готово":
-        # Сохраняем фото (может быть пустым списком)
-        await state.update_data(photos=photos)
-        
-        # Переходим к вводу адреса
-        await state.set_state(RequestStates.waiting_address)
-        await message.answer(
-            "📍 Отправьте геолокацию или введите адрес вручную:",
-            reply_markup=get_location_keyboard()
-        )
-        logger.info(f"Загружено фото: {len(photos)} шт.")
-    
-    elif message.text == "⬅️ Отмена":
-        await state.clear()
-        await message.answer("❌ Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
-    
-    elif message.photo:
-        # Сохраняем file_id фото
-        photos.append(message.photo[-1].file_id)
-        await state.update_data(photos=photos)
-        await message.answer(f"✅ Фото добавлено. Всего: {len(photos)}. Можете добавить еще или нажать '✅ Готово'.")
-
-@router.message(RequestStates.waiting_address, F.content_type == ContentType.LOCATION)
-async def process_location(message: Message, state: FSMContext, session: AsyncSession = None):
-    """
-    Обработка геолокации
+    Монтажник берет заявку из группы - БЕЗ ФИЛЬТРА ПО ЧАТУ
     """
     try:
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
-        location = message.location
-        lat, lon = location.latitude, location.longitude
-        
-        # Сохраняем координаты
-        await state.update_data(latitude=lat, longitude=lon)
-        
-        # Пытаемся получить адрес через геокодер
-        geocoder = GeocoderService(session)
-        address = await geocoder.reverse_geocode(lat, lon)
-        
-        if address:
-            # Сохраняем адрес и переходим к телефону
-            await state.update_data(address=address)
-            await state.set_state(RequestStates.waiting_phone)
-            await message.answer(
-                f"✅ Адрес определен:\n{address}\n\n"
-                f"📞 Введите номер телефона для связи\n"
-                f"(например: +7XXXXXXXXXX или 8XXXXXXXXXX):",
-                reply_markup=get_cancel_keyboard()
-            )
-            logger.info(f"Адрес определен по геолокации: {address}")
-        else:
-            # Если не удалось определить адрес, просим ввести вручную
-            await state.set_state(RequestStates.waiting_address_manual)
-            await message.answer(
-                "❌ Не удалось определить адрес по геолокации.\n"
-                "Пожалуйста, введите адрес вручную:",
-                reply_markup=get_cancel_keyboard()
-            )
-            
-    except Exception as e:
-        logger.error(f"Ошибка обработки геолокации: {e}", exc_info=True)
-        await message.answer("❌ Произошла ошибка. Попробуйте ввести адрес вручную.")
-        await state.set_state(RequestStates.waiting_address_manual)
+        # Подробное логирование входящего callback
+        logger.info("=" * 50)
+        logger.info(f"🔥 TAKE CALLBACK ПОЛУЧЕН: {callback.data}")
+        logger.info(f"🔥 От пользователя: {callback.from_user.id} (@{callback.from_user.username})")
+        logger.info(f"🔥 В чате: {callback.message.chat.id} ({callback.message.chat.type})")
+        logger.info(f"🔥 Сообщение ID: {callback.message.message_id}")
+        logger.info("=" * 50)
 
-@router.message(RequestStates.waiting_address, F.text)
-async def process_manual_address_choice(message: Message, state: FSMContext):
-    """
-    Обработка выбора ручного ввода адреса
-    """
-    if message.text == "⬅️ Отмена":
-        await state.clear()
-        await message.answer("❌ Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
-        return
-    
-    if message.text == "✏️ Ввести адрес вручную":
-        await state.set_state(RequestStates.waiting_address_manual)
-        await message.answer("✏️ Введите адрес вручную:", reply_markup=get_cancel_keyboard())
-        return
-    
-    await message.answer("❌ Пожалуйста, используйте кнопки меню или отправьте геолокацию.")
-
-@router.message(RequestStates.waiting_address_manual)
-async def process_manual_address_input(message: Message, state: FSMContext):
-    """
-    Обработка ручного ввода адреса
-    """
-    if message.text == "⬅️ Отмена":
-        await state.clear()
-        await message.answer("❌ Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
-        return
-    
-    if not message.text or len(message.text.strip()) < 5:
-        await message.answer("❌ Адрес должен содержать не менее 5 символов. Попробуйте еще раз:")
-        return
-    
-    # Сохраняем адрес
-    await state.update_data(address=message.text.strip())
-    
-    # Переходим к вводу телефона
-    await state.set_state(RequestStates.waiting_phone)
-    await message.answer(
-        "📞 Введите номер телефона для связи\n"
-        "(например: +7XXXXXXXXXX или 8XXXXXXXXXX):",
-        reply_markup=get_cancel_keyboard()
-    )
-
-@router.message(RequestStates.waiting_phone)
-async def process_phone(message: Message, state: FSMContext):
-    """
-    Обработка номера телефона
-    """
-    if message.text == "⬅️ Отмена":
-        await state.clear()
-        await message.answer("❌ Создание заявки отменено.", reply_markup=get_customer_main_keyboard())
-        return
-    
-    phone = message.text.strip()
-    
-    # Проверяем корректность номера
-    if not validate_phone(phone):
-        await message.answer(
-            "❌ Неверный формат номера.\n"
-            "Пожалуйста, введите номер в формате +7XXXXXXXXXX или 8XXXXXXXXXX:"
-        )
-        return
-    
-    # Сохраняем телефон
-    await state.update_data(phone=phone)
-    
-    # Переходим к выбору района
-    await state.set_state(RequestStates.waiting_district)
-    await message.answer(
-        "🏘 Выберите район:",
-        reply_markup=get_district_keyboard()
-    )
-    logger.info(f"Пользователь ввел телефон, переходим к выбору района")
-
-@router.callback_query(StateFilter(RequestStates.waiting_district))
-async def debug_district_callback(callback: CallbackQuery, state: FSMContext):
-    """
-    Отладочный обработчик для просмотра всех callback'ов в состоянии выбора района
-    """
-    logger.info(f"DEBUG - Callback в состоянии выбора района: {callback.data}")
-    logger.info(f"DEBUG - От пользователя: {callback.from_user.id}")
-    
-    # Проверяем состояние
-    current_state = await state.get_state()
-    data = await state.get_data()
-    logger.info(f"DEBUG - Текущее состояние: {current_state}")
-    logger.info(f"DEBUG - Данные состояния: {data}")
-    
-    # Если это наш callback, передаем дальше
-    if callback.data.startswith("district_"):
-        await process_district(callback, state)
-    else:
-        await callback.answer("Неизвестное действие")
-
-async def process_district(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
-    """
-    Обработка выбора района и создание заявки - ИСПРАВЛЕНО
-    """
-    try:
         # Отвечаем на callback сразу, чтобы избежать таймаута
-        await callback.answer("Обрабатываю выбор района...")
+        await callback.answer("⏳ Обрабатываю запрос...")
+
+        # Проверяем, что это группа монтажников
+        if callback.message.chat.id != GROUP_ID:
+            logger.warning(f"⚠️ Попытка взять заявку из другого чата: {callback.message.chat.id}")
+            await callback.answer("❌ Это действие доступно только в группе монтажников", show_alert=True)
+            return
+
+        if not session:
+            logger.debug("Создаем новую сессию БД")
+            async for db_session in get_db():
+                session = db_session
+                break
+
+        # Извлекаем ID заявки
+        request_id = extract_message_id(callback.data, "take_")
+        logger.info(f"📌 Извлечен ID заявки: {request_id}")
+
+        if not request_id:
+            logger.error("❌ Не удалось извлечь ID заявки из callback_data")
+            await callback.answer("❌ Неверный ID заявки", show_alert=True)
+            return
+
+        # Получаем монтажника
+        logger.debug(f"🔍 Поиск монтажника с telegram_id: {callback.from_user.id}")
+        query = select(User).where(
+            and_(
+                User.telegram_id == callback.from_user.id,
+                User.role == UserRole.INSTALLER
+            )
+        )
+        result = await session.execute(query)
+        installer = result.scalar_one_or_none()
+
+        if not installer:
+            logger.error(f"❌ Пользователь {callback.from_user.id} не найден или не является монтажником")
+            await callback.answer("❌ Вы не зарегистрированы как монтажник", show_alert=True)
+            return
+
+        logger.info(f"✅ Монтажник найден: ID={installer.id}, имя={installer.first_name}")
+
+        # Получаем информацию о заявке ДО обновления для логирования
+        query = select(Request).where(Request.id == request_id)
+        result = await session.execute(query)
+        request_before = result.scalar_one_or_none()
+
+        if not request_before:
+            logger.error(f"❌ Заявка с ID {request_id} не найдена")
+            await callback.answer("❌ Заявка не найдена", show_alert=True)
+            return
+
+        logger.info(f"📋 Заявка #{request_id} до обновления: статус={request_before.status.value}, "
+                   f"installer_id={request_before.installer_id}")
+
+        # Атомарно обновляем заявку
+        logger.debug("🔄 Выполняем атомарное обновление заявки")
+        stmt = update(Request).where(
+            Request.id == request_id,
+            Request.status == RequestStatus.NEW
+        ).values(
+            installer_id=installer.id,
+            status=RequestStatus.IN_PROGRESS,
+            taken_at=datetime.now()
+        ).returning(Request)
+
+        result = await session.execute(stmt)
+        updated_request = result.scalar_one_or_none()
+        await session.commit()
+
+        if not updated_request:
+            # Если не обновилось, значит заявка уже не NEW
+            logger.warning(f"⚠️ Заявка #{request_id} не может быть взята - статус изменился")
+            
+            # Получаем актуальную информацию о заявке
+            query = select(Request).where(Request.id == request_id)
+            result = await session.execute(query)
+            current_request = result.scalar_one_or_none()
+            
+            if current_request:
+                logger.warning(f"Текущий статус заявки: {current_request.status.value}, "
+                             f"installer_id: {current_request.installer_id}")
+                
+                if current_request.installer:
+                    taker_name = current_request.installer.first_name or current_request.installer.username
+                    await callback.answer(
+                        f"❌ Заявка уже взята монтажником {taker_name}",
+                        show_alert=True
+                    )
+                else:
+                    await callback.answer(
+                        f"❌ Заявка уже {current_request.status.value}",
+                        show_alert=True
+                    )
+            else:
+                await callback.answer("❌ Заявка не найдена", show_alert=True)
+            
+            return
+
+        # УСПЕХ - заявка взята
+        logger.info(f"✅ ЗАЯВКА #{request_id} УСПЕШНО ВЗЯТА монтажником {installer.id}")
+        logger.info(f"Новый статус: {updated_request.status.value}, taken_at: {updated_request.taken_at}")
+
+        # Уведомляем заказчика
+        try:
+            logger.debug(f"📱 Отправка уведомления заказчику {updated_request.customer.telegram_id}")
+            notification_service = NotificationService(callback.bot, session)
+            await notification_service.notify_customer(
+                updated_request.customer.telegram_id,
+                f"🔨 Заявка #{updated_request.id} взята в работу!\n\n"
+                f"Монтажник: {installer.first_name or installer.username}\n"
+                f"Скоро с вами свяжутся."
+            )
+            logger.info("✅ Уведомление заказчику отправлено")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при уведомлении заказчика: {e}", exc_info=True)
+
+        # Отправляем детали монтажнику
+        try:
+            logger.debug(f"📱 Отправка деталей заявки монтажнику {installer.telegram_id}")
+            await notification_service.send_request_details_to_installer(updated_request, installer)
+            logger.info("✅ Детали заявки отправлены монтажнику")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при отправке деталей монтажнику: {e}", exc_info=True)
+
+        # Обновляем сообщение в группе
+        try:
+            logger.debug(f"🔍 Поиск сообщения в группе для заявки #{request_id}")
+            query = select(GroupMessage).where(GroupMessage.request_id == updated_request.id)
+            result = await session.execute(query)
+            group_message = result.scalar_one_or_none()
+
+            if group_message:
+                logger.info(f"✅ Найдено сообщение в группе: chat_id={group_message.chat_id}, "
+                           f"message_id={group_message.message_id}")
+                
+                try:
+                    await notification_service.update_group_message(
+                        group_message.chat_id,
+                        group_message.message_id,
+                        updated_request
+                    )
+                    logger.info("✅ Сообщение в группе успешно обновлено")
+                except Exception as e:
+                    logger.error(f"❌ Не удалось обновить сообщение в группе: {e}", exc_info=True)
+                    # Пытаемся отправить новое сообщение как запасной вариант
+                    await callback.bot.send_message(
+                        group_message.chat_id,
+                        f"⚠️ Заявка #{updated_request.id} взята монтажником "
+                        f"{installer.first_name or installer.username}.\n"
+                        f"(не удалось обновить оригинальное сообщение)"
+                    )
+            else:
+                logger.warning(f"⚠️ Не найдена запись GroupMessage для заявки #{request_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при работе с сообщением в группе: {e}", exc_info=True)
+
+        # Отправляем подтверждение монтажнику
+        await callback.answer(
+            f"✅ Заявка #{request_id} успешно взята!",
+            show_alert=False
+        )
         
-        # Получаем сессию БД если не передана
+        logger.info(f"✅ Процесс взятия заявки #{request_id} завершен успешно")
+
+    except Exception as e:
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при взятии заявки: {e}", exc_info=True)
+        await callback.answer("❌ Произошла ошибка", show_alert=True)
+        if session:
+            await session.rollback()
+
+@router.callback_query(F.data.startswith("refuse_"))
+async def process_refuse_request(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+    """
+    Монтажник отказывается от заявки - БЕЗ ФИЛЬТРА ПО ЧАТУ
+    """
+    try:
+        logger.info(f"❌ Получен отказ от заявки: {callback.data} от {callback.from_user.id}")
+        
+        # Проверяем, что это группа монтажников
+        if callback.message.chat.id != GROUP_ID:
+            logger.warning(f"⚠️ Попытка отказа от заявки из другого чата: {callback.message.chat.id}")
+            await callback.answer("❌ Это действие доступно только в группе монтажников", show_alert=True)
+            return
+        
+        request_id = extract_message_id(callback.data, "refuse_")
+        if not request_id:
+            await callback.answer("Неверный ID заявки")
+            return
+
         if not session:
             async for db_session in get_db():
                 session = db_session
                 break
-        
-        # Извлекаем название района из callback_data
-        district_callback = callback.data.replace("district_", "")
-        # Восстанавливаем оригинальное название (заменяем _ на пробелы)
-        district_name = district_callback.replace('_', ' ')
-        
-        logger.info(f"Выбран район: {district_name} (callback: {district_callback})")
-        
-        # Проверяем, что район есть в списке
-        if district_name not in DISTRICTS:
-            # Пробуем найти по частичному совпадению
-            found = False
-            for d in DISTRICTS:
-                normalized_d = d.replace(' ', '_').replace('-', '_').replace('.', '_')
-                if normalized_d == district_callback:
-                    district_name = d
-                    found = True
-                    break
-            
-            if not found:
-                logger.error(f"Район не найден: {district_name}")
-                await callback.message.edit_text(
-                    "❌ Ошибка: выбранный район не найден. Попробуйте снова.",
-                    reply_markup=get_district_keyboard()
-                )
-                return
-        
-        # Получаем все данные из состояния
-        data = await state.get_data()
-        
-        # Проверяем наличие всех необходимых данных
-        required_fields = ['description', 'address', 'phone']
-        missing_fields = [field for field in required_fields if field not in data]
-        
-        if missing_fields:
-            logger.error(f"Отсутствуют поля: {missing_fields}")
-            await callback.message.edit_text(
-                "❌ Ошибка: не все данные заполнены. Начните создание заявки заново."
-            )
-            await state.clear()
-            return
-        
-        # Получаем пользователя
-        query = select(User).where(User.telegram_id == callback.from_user.id)
+
+        # Отвечаем на callback сразу
+        await callback.answer("⏳ Запрашиваю причину отказа...")
+
+        query = select(Request).where(Request.id == request_id)
         result = await session.execute(query)
-        user = result.scalar_one_or_none()
-        
-        if not user:
-            logger.error(f"Пользователь не найден: {callback.from_user.id}")
-            await callback.message.edit_text(
-                "❌ Ошибка: пользователь не найден. Используйте /start для регистрации."
-            )
-            await state.clear()
+        request = result.scalar_one_or_none()
+
+        if not request:
+            await callback.answer("Заявка не найдена")
             return
-        
-        # Получаем или создаем район в БД
-        query = select(District).where(District.name == district_name)
-        result = await session.execute(query)
-        district = result.scalar_one_or_none()
-        
-        if not district:
-            # Создаем район, если его нет в БД
-            district = District(name=district_name, is_active=True)
-            session.add(district)
-            await session.flush()  # Получаем ID без коммита
-            logger.info(f"Создан новый район в БД: {district_name}")
-        
-        # Создаем заявку
-        new_request = Request(
-            customer_id=user.id,
-            district_id=district.id,
-            description=data['description'],
-            photos=json_serialize_photos(data.get('photos', [])),
-            address=data['address'],
-            latitude=data.get('latitude'),
-            longitude=data.get('longitude'),
-            phone=data['phone'],
-            status=RequestStatus.NEW
-        )
-        
-        session.add(new_request)
-        await session.commit()  # Коммитим, чтобы получить ID заявки
-        
-        logger.info(f"Создана новая заявка #{new_request.id} в районе {district_name}")
-        
-        # Отправляем заявку в группу
-        try:
-            bot = callback.bot
-            notification_service = NotificationService(bot, session)
-            sent_message = await notification_service.send_request_to_group(new_request, GROUP_ID)
+
+        if request.status != RequestStatus.NEW:
+            status_text = {
+                RequestStatus.IN_PROGRESS: "уже в работе",
+                RequestStatus.COMPLETED: "уже выполнена",
+                RequestStatus.CANCELLED: "отменена"
+            }.get(request.status, "изменила статус")
             
-            if sent_message:
-                # Сохраняем информацию о сообщении в группе
-                group_message = GroupMessage(
-                    request_id=new_request.id,
-                    chat_id=GROUP_ID,
-                    message_id=sent_message.message_id
-                )
-                session.add(group_message)
-                await session.commit()
-                logger.info(f"Заявка #{new_request.id} отправлена в группу, message_id: {sent_message.message_id}")
-            else:
-                logger.error(f"Не удалось отправить заявку #{new_request.id} в группу")
-                
-        except Exception as e:
-            logger.error(f"Ошибка при отправке в группу: {e}", exc_info=True)
-            # Продолжаем выполнение, даже если не удалось отправить в группу
-        
-        # Очищаем состояние
-        await state.clear()
-        
-        # Отправляем подтверждение заказчику
-        await callback.message.edit_text(
-            f"✅ <b>Заявка #{new_request.id} успешно создана!</b>\n\n"
-            f"📍 <b>Адрес:</b> {data['address']}\n"
-            f"🏘 <b>Район:</b> {district_name}\n"
-            f"📞 <b>Телефон:</b> {data['phone']}\n"
-            f"📸 <b>Фото:</b> {len(data.get('photos', []))} шт.\n\n"
-            f"Монтажники уже получили уведомление. Мы оповестим вас, когда заявка будет взята в работу.",
-            parse_mode="HTML"
-        )
-        
-        # Возвращаем пользователя в главное меню
+            await callback.answer(f"❌ Эта заявка {status_text}, отказ невозможен", show_alert=True)
+            return
+
+        # Сохраняем ID заявки в состояние и запрашиваем причину
+        await state.update_data(refuse_request_id=request_id)
+        await state.set_state(RefusalStates.waiting_reason)
+
+        # Отправляем сообщение в ЛС монтажника для ввода причины
         await callback.message.answer(
-            "Выберите действие:",
-            reply_markup=get_customer_main_keyboard()
+            "❓ Пожалуйста, укажите причину отказа от заявки:\n"
+            "(минимум 5 символов)",
+            reply_markup=remove_keyboard
         )
-        
+
+        logger.info(f"📝 Запрошена причина отказа для заявки #{request_id}")
+
     except Exception as e:
-        logger.error(f"Ошибка при создании заявки: {e}", exc_info=True)
-        await callback.message.edit_text(
-            "❌ Произошла ошибка при создании заявки. Пожалуйста, попробуйте снова."
+        logger.error(f"Ошибка при запросе причины отказа: {e}", exc_info=True)
+        await callback.answer("Ошибка")
+
+@router.message(StateFilter(RefusalStates.waiting_reason))
+async def process_refuse_reason(message: Message, state: FSMContext, session: AsyncSession = None):
+    """
+    Обработка причины отказа и завершение отказа
+    """
+    try:
+        logger.info(f"📝 Получена причина отказа от {message.from_user.id}: {message.text}")
+        
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
+
+        if message.text == "⬅️ Отмена":
+            await state.clear()
+            await message.answer("Отказ отменен.", reply_markup=get_installer_main_keyboard())
+            return
+
+        if not message.text or len(message.text) < 5:
+            await message.answer("Причина должна содержать не менее 5 символов. Попробуйте еще раз:")
+            return
+
+        data = await state.get_data()
+        request_id = data.get('refuse_request_id')
+
+        if not request_id:
+            await state.clear()
+            await message.answer("Ошибка: заявка не найдена")
+            return
+
+        # Повторно проверяем статус внутри транзакции
+        async with session.begin():
+            query = select(Request).where(Request.id == request_id).with_for_update()
+            result = await session.execute(query)
+            request = result.scalar_one_or_none()
+
+            if not request:
+                await message.answer("Заявка не найдена")
+                await state.clear()
+                return
+
+            if request.status != RequestStatus.NEW:
+                await message.answer("❌ Заявка уже взята другим монтажником. Отказ невозможен.")
+                await state.clear()
+                return
+
+            query = select(User).where(User.telegram_id == message.from_user.id)
+            result = await session.execute(query)
+            installer = result.scalar_one_or_none()
+
+            refusal = Refusal(
+                request_id=request.id,
+                installer_id=installer.id,
+                reason=message.text
+            )
+            session.add(refusal)
+
+        await session.commit()
+        logger.info(f"✅ Отказ зарегистрирован для заявки #{request_id} от монтажника {installer.id}")
+
+        # Обновляем сообщение в группе
+        query = select(GroupMessage).where(GroupMessage.request_id == request.id)
+        result = await session.execute(query)
+        group_message = result.scalar_one_or_none()
+
+        if group_message:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=group_message.chat_id,
+                    message_id=group_message.message_id,
+                    text=f"⚠️ <b>Заявка #{request.id}</b>\n\n"
+                         f"Монтажник {installer.first_name or installer.username} отказался от заявки.\n"
+                         f"<b>Причина:</b> {message.text}\n\n"
+                         f"Заявка снова доступна для других монтажников.",
+                    parse_mode="HTML"
+                )
+                logger.info(f"✅ Сообщение в группе обновлено после отказа")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при обновлении сообщения после отказа: {e}")
+
+        await message.answer(
+            "✅ Отказ зарегистрирован. Заявка осталась в группе для других монтажников.",
+            reply_markup=get_installer_main_keyboard()
         )
+
+        await state.clear()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отказе от заявки: {e}", exc_info=True)
+        await message.answer("❌ Произошла ошибка")
         await state.clear()
         await session.rollback()
 
-@router.message(F.text == "ℹ️ Помощь")
-async def cmd_help(message: Message):
+@router.callback_query(F.data.startswith("complete_"))
+async def process_complete_request(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
     """
-    Обработчик кнопки помощи
+    Завершение заявки монтажником
     """
-    help_text = """
-<b>🔧 Помощь по боту</b>
+    try:
+        logger.info(f"✅ Завершение заявки: {callback.data} от {callback.from_user.id}")
+        
+        if not session:
+            async for db_session in get_db():
+                session = db_session
+                break
 
-<b>Для заказчиков:</b>
-• 📝 Новая заявка - создать заявку на монтаж
-• 📋 Мои заявки - посмотреть статус ваших заявок
+        request_id = extract_message_id(callback.data, "complete_")
+        if not request_id:
+            await callback.answer("Неверный ID заявки")
+            return
 
-<b>Для монтажников:</b>
-• 📋 Мои заявки - список взятых заявок
-• В группе можно брать или отказываться от заявок
+        query = select(Request).where(Request.id == request_id)
+        result = await session.execute(query)
+        request = result.scalar_one_or_none()
 
-<b>Общее:</b>
-• /start - перезапустить бота
-• /help - показать это сообщение
+        if not request:
+            await callback.answer("Заявка не найдена")
+            return
 
-По вопросам: @admin
-    """
-    
-    await message.answer(help_text, parse_mode="HTML")
+        query = select(User).where(User.telegram_id == callback.from_user.id)
+        result = await session.execute(query)
+        installer = result.scalar_one_or_none()
 
-async def send_role_menu(message: Message, user: User):
-    """
-    Отправка меню в зависимости от роли
-    """
-    from keyboards.reply import get_customer_main_keyboard, get_installer_main_keyboard, get_admin_main_keyboard
-    
-    welcome_text = f"👋 С возвращением, {user.first_name or 'пользователь'}!"
-    
-    if user.is_admin:
-        await message.answer(
-            welcome_text + "\n\nВы вошли как администратор.",
-            reply_markup=get_admin_main_keyboard()
+        if not installer or request.installer_id != installer.id:
+            await callback.answer("У вас нет прав для завершения этой заявки")
+            return
+
+        if request.status != RequestStatus.IN_PROGRESS:
+            await callback.answer("Заявка уже завершена или не в работе")
+            return
+
+        request.status = RequestStatus.COMPLETED
+        request.completed_at = datetime.now()
+        await session.commit()
+
+        logger.info(f"✅ Заявка #{request_id} завершена монтажником {installer.id}")
+
+        # Уведомляем заказчика
+        notification_service = NotificationService(callback.bot, session)
+        await notification_service.notify_customer(
+            request.customer.telegram_id,
+            f"✅ Заявка #{request.id} выполнена!\n\n"
+            f"Монтажник {installer.first_name or installer.username} завершил работу."
         )
-    elif user.role.value == "customer":
-        await message.answer(
-            welcome_text + "\n\nВы вошли как заказчик.",
-            reply_markup=get_customer_main_keyboard()
-        )
-    elif user.role.value == "installer":
-        await message.answer(
-            welcome_text + "\n\nВы вошли как монтажник.",
-            reply_markup=get_installer_main_keyboard()
-        )
+
+        # Обновляем сообщение в ЛС монтажника
+        await callback.message.edit_reply_markup(reply_markup=None)
+        
+        # Если есть caption (фото), обновляем его, иначе текст
+        if callback.message.caption:
+            await callback.message.edit_caption(
+                callback.message.caption + "\n\n✅ <b>Заявка завершена!</b>",
+                parse_mode="HTML"
+            )
+        else:
+            await callback.message.edit_text(
+                callback.message.text + "\n\n✅ <b>Заявка завершена!</b>",
+                parse_mode="HTML"
+            )
+
+        # Обновляем сообщение в группе
+        query = select(GroupMessage).where(GroupMessage.request_id == request.id)
+        result = await session.execute(query)
+        group_message = result.scalar_one_or_none()
+
+        if group_message:
+            await notification_service.update_group_message(
+                group_message.chat_id,
+                group_message.message_id,
+                request
+            )
+
+        await callback.answer("✅ Заявка успешно завершена!")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при завершении заявки: {e}", exc_info=True)
+        await callback.answer("Ошибка при завершении заявки")
+        await session.rollback()
+
+async def send_request_details(message: Message, request: Request, installer: User, session: AsyncSession):
+    """
+    Отправка деталей заявки монтажнику
+    """
+    try:
+        notification_service = NotificationService(message.bot, session)
+        await notification_service.send_request_details_to_installer(request, installer)
+        logger.info(f"✅ Детали заявки #{request.id} отправлены монтажнику {installer.id}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки деталей заявки: {e}", exc_info=True)
