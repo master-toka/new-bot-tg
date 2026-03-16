@@ -1,9 +1,8 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, ContentType
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_
 import logging
 from datetime import datetime
 import json
@@ -14,25 +13,22 @@ from states.customer_states import RefusalStates
 from keyboards.reply import get_installer_main_keyboard, get_cancel_keyboard, remove_keyboard
 from keyboards.inline import get_installer_request_keyboard, get_confirmation_keyboard
 from services.notifications import NotificationService
-from utils.helpers import extract_message_id, json_deserialize_photos
+from services.statistics import StatisticsService
+from utils.helpers import extract_message_id, json_deserialize_photos, format_phone
 from config import GROUP_ID
+from utils.db_helper import with_session
 
 logger = logging.getLogger(__name__)
 
 router = Router()
 
 @router.message(F.text == "📋 Мои заявки")
-async def cmd_my_requests(message: Message, session: AsyncSession = None):
+@with_session
+async def cmd_my_requests(message: Message, session):
     """
     Просмотр списка активных заявок монтажника
     """
     try:
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
         # Получаем пользователя
         query = select(User).where(User.telegram_id == message.from_user.id)
         result = await session.execute(query)
@@ -44,11 +40,7 @@ async def cmd_my_requests(message: Message, session: AsyncSession = None):
         
         # Проверяем, что это монтажник
         if user.role != UserRole.INSTALLER:
-            # Если это заказчик, показываем соответствующее сообщение
-            await message.answer(
-                "Эта функция доступна только монтажникам.\n"
-                "Используйте меню заказчика для просмотра ваших заявок."
-            )
+            await message.answer("Эта функция доступна только монтажникам.")
             return
         
         # Получаем активные заявки монтажника (в работе)
@@ -104,7 +96,7 @@ async def cmd_my_requests(message: Message, session: AsyncSession = None):
         if completed_requests:
             text = "✅ <b>Последние выполненные заявки:</b>\n\n"
             
-            for req in completed_requests[:3]:  # Показываем только 3 последних
+            for req in completed_requests[:3]:
                 text += f"<b>Заявка #{req.id}</b> - {req.completed_at.strftime('%d.%m.%Y')}\n"
                 text += f"📍 {req.address[:50]}{'...' if len(req.address) > 50 else ''}\n"
                 text += "➖➖➖➖➖➖➖\n"
@@ -115,18 +107,45 @@ async def cmd_my_requests(message: Message, session: AsyncSession = None):
         logger.error(f"Ошибка в cmd_my_requests: {e}")
         await message.answer("Произошла ошибка. Попробуйте позже.")
 
+@router.message(F.text == "📊 Моя статистика")
+@with_session
+async def cmd_my_stats(message: Message, session):
+    """
+    Просмотр личной статистики монтажника
+    """
+    try:
+        # Получаем пользователя
+        query = select(User).where(User.telegram_id == message.from_user.id)
+        result = await session.execute(query)
+        installer = result.scalar_one_or_none()
+        
+        if not installer or installer.role != UserRole.INSTALLER:
+            await message.answer("Эта функция доступна только монтажникам")
+            return
+        
+        stats_service = StatisticsService(session)
+        stats = await stats_service.get_installer_personal_stats(installer.id)
+        
+        text = f"📊 <b>Статистика монтажника</b>\n\n"
+        text += f"👤 {installer.first_name or installer.username}\n\n"
+        text += f"✅ Выполнено всего: {stats.get('completed', 0)}\n"
+        text += f"🔵 В работе: {stats.get('in_progress', 0)}\n"
+        text += f"❌ Отказов: {stats.get('refusals', 0)}\n"
+        text += f"📅 За 30 дней: {stats.get('month_completed', 0)}\n"
+        
+        await message.answer(text, parse_mode="HTML", reply_markup=get_installer_main_keyboard())
+        
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_my_stats: {e}")
+        await message.answer("❌ Ошибка при получении статистики")
+
 @router.callback_query(F.data.startswith("take_"))
-async def process_take_request(callback: CallbackQuery, session: AsyncSession = None):
+@with_session
+async def process_take_request(callback: CallbackQuery, session):
     """
     Монтажник берет заявку из группы
     """
     try:
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
         request_id = extract_message_id(callback.data, "take_")
         if not request_id:
             await callback.answer("Неверный ID заявки")
@@ -168,11 +187,12 @@ async def process_take_request(callback: CallbackQuery, session: AsyncSession = 
         
         # Уведомляем заказчика
         notification_service = NotificationService(callback.bot, session)
-        customer_name = installer.first_name or installer.username or "Монтажник"
+        installer_name = installer.first_name or installer.username or "Монтажник"
+        
         await notification_service.notify_customer(
             request.customer.telegram_id,
             f"✅ <b>Заявка #{request.id} взята в работу!</b>\n\n"
-            f"👤 Монтажник: {customer_name}\n"
+            f"👤 Монтажник: {installer_name}\n"
             f"📞 Скоро с вами свяжутся для уточнения деталей.\n\n"
             f"Статус заявки можно отслеживать в разделе «Мои заявки»."
         )
@@ -189,9 +209,9 @@ async def process_take_request(callback: CallbackQuery, session: AsyncSession = 
         
         await callback.answer("✅ Заявка взята в работу!")
         
-        # Отправляем подтверждение в группу (опционально)
+        # Отправляем подтверждение в группу
         await callback.message.answer(
-            f"✅ Монтажник {customer_name} взял заявку #{request.id} в работу!"
+            f"✅ Монтажник {installer_name} взял заявку #{request.id} в работу!"
         )
         
     except Exception as e:
@@ -200,7 +220,7 @@ async def process_take_request(callback: CallbackQuery, session: AsyncSession = 
         await session.rollback()
 
 @router.callback_query(F.data.startswith("refuse_"))
-async def process_refuse_request(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+async def process_refuse_request(callback: CallbackQuery, state: FSMContext):
     """
     Монтажник отказывается от заявки - запрос причины
     """
@@ -208,26 +228,6 @@ async def process_refuse_request(callback: CallbackQuery, state: FSMContext, ses
         request_id = extract_message_id(callback.data, "refuse_")
         if not request_id:
             await callback.answer("Неверный ID заявки")
-            return
-        
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
-        # Получаем заявку для проверки
-        query = select(Request).where(Request.id == request_id)
-        result = await session.execute(query)
-        request = result.scalar_one_or_none()
-        
-        if not request:
-            await callback.answer("Заявка не найдена")
-            return
-        
-        # Проверяем, что заявка еще новая
-        if request.status != RequestStatus.NEW:
-            await callback.answer("❌ Эта заявка уже не доступна для отказа")
             return
         
         # Сохраняем ID заявки в состояние
@@ -247,17 +247,12 @@ async def process_refuse_request(callback: CallbackQuery, state: FSMContext, ses
         await callback.answer("❌ Ошибка")
 
 @router.message(StateFilter(RefusalStates.waiting_reason))
-async def process_refuse_reason(message: Message, state: FSMContext, session: AsyncSession = None):
+@with_session
+async def process_refuse_reason(message: Message, state: FSMContext, session):
     """
     Обработка причины отказа и завершение отказа
     """
     try:
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
         if message.text == "⬅️ Отмена":
             await state.clear()
             await message.answer(
@@ -349,49 +344,19 @@ async def process_refuse_reason(message: Message, state: FSMContext, session: As
         await session.rollback()
 
 @router.callback_query(F.data.startswith("complete_"))
-async def process_complete_request(callback: CallbackQuery, state: FSMContext, session: AsyncSession = None):
+async def process_complete_request(callback: CallbackQuery, state: FSMContext):
     """
-    Завершение заявки монтажником
+    Завершение заявки монтажником - запрос подтверждения
     """
     try:
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
         request_id = extract_message_id(callback.data, "complete_")
         if not request_id:
             await callback.answer("Неверный ID заявки")
             return
         
-        # Получаем заявку
-        query = select(Request).where(Request.id == request_id)
-        result = await session.execute(query)
-        request = result.scalar_one_or_none()
-        
-        if not request:
-            await callback.answer("Заявка не найдена")
-            return
-        
-        # Получаем монтажника
-        query = select(User).where(User.telegram_id == callback.from_user.id)
-        result = await session.execute(query)
-        installer = result.scalar_one_or_none()
-        
-        # Проверяем, что монтажник имеет право завершить заявку
-        if not installer or request.installer_id != installer.id:
-            await callback.answer("❌ У вас нет прав для завершения этой заявки")
-            return
-        
-        # Проверяем статус
-        if request.status != RequestStatus.IN_PROGRESS:
-            await callback.answer("❌ Заявка уже завершена или не в работе")
-            return
-        
         # Запрашиваем подтверждение
         await callback.message.answer(
-            f"❓ Подтвердите завершение заявки #{request.id}",
+            f"❓ Подтвердите завершение заявки #{request_id}",
             reply_markup=get_confirmation_keyboard(request_id, "complete")
         )
         
@@ -402,17 +367,12 @@ async def process_complete_request(callback: CallbackQuery, state: FSMContext, s
         await callback.answer("❌ Ошибка")
 
 @router.callback_query(F.data.startswith("confirm_complete_"))
-async def confirm_complete_request(callback: CallbackQuery, session: AsyncSession = None):
+@with_session
+async def confirm_complete_request(callback: CallbackQuery, session):
     """
     Подтверждение завершения заявки
     """
     try:
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
         request_id = extract_message_id(callback.data, "confirm_complete_")
         if not request_id:
             await callback.answer("Неверный ID заявки")
@@ -454,18 +414,7 @@ async def confirm_complete_request(callback: CallbackQuery, session: AsyncSessio
         )
         
         # Обновляем сообщение в ЛС монтажника
-        if callback.message.photo:
-            await callback.message.edit_caption(
-                callback.message.caption + "\n\n✅ <b>Заявка завершена!</b>",
-                parse_mode="HTML",
-                reply_markup=None
-            )
-        else:
-            await callback.message.edit_text(
-                callback.message.text + "\n\n✅ <b>Заявка завершена!</b>",
-                parse_mode="HTML",
-                reply_markup=None
-            )
+        await callback.message.delete()
         
         # Обновляем сообщение в группе
         query = select(GroupMessage).where(GroupMessage.request_id == request.id)
@@ -500,7 +449,8 @@ async def cancel_complete_request(callback: CallbackQuery):
     await callback.answer("Завершение отменено")
 
 @router.callback_query(F.data.startswith("view_coords_"))
-async def view_request_coords(callback: CallbackQuery, session: AsyncSession = None):
+@with_session
+async def view_request_coords(callback: CallbackQuery, session):
     """
     Просмотр координат заявки на карте
     """
@@ -509,12 +459,6 @@ async def view_request_coords(callback: CallbackQuery, session: AsyncSession = N
         if not request_id:
             await callback.answer("Неверный ID заявки")
             return
-        
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
         
         # Получаем заявку
         query = select(Request).where(Request.id == request_id)
@@ -528,8 +472,7 @@ async def view_request_coords(callback: CallbackQuery, session: AsyncSession = N
         # Отправляем локацию
         await callback.message.answer_location(
             latitude=request.latitude,
-            longitude=request.longitude,
-            reply_to_message_id=callback.message.message_id
+            longitude=request.longitude
         )
         
         await callback.answer()
@@ -549,6 +492,7 @@ async def cmd_help(message: Message):
 
 <b>Доступные команды:</b>
 • 📋 Мои заявки - посмотреть ваши активные и завершенные заявки
+• 📊 Моя статистика - личная статистика
 • ℹ️ Помощь - показать это сообщение
 
 <b>Как работать с заявками:</b>
@@ -572,84 +516,12 @@ async def cmd_help(message: Message):
 • Всегда указывайте причину отказа
 • После завершения заявки она попадает в статистику
 
-По вопросам: @admin
+По вопросам: @Master_tok
     """
     
     await message.answer(help_text, parse_mode="HTML", reply_markup=get_installer_main_keyboard())
 
-@router.message(Command("stats"))
-async def cmd_my_stats(message: Message, session: AsyncSession = None):
-    """
-    Просмотр личной статистики монтажника
-    """
-    try:
-        # Получаем сессию БД если не передана
-        if not session:
-            async for db_session in get_db():
-                session = db_session
-                break
-        
-        # Получаем пользователя
-        query = select(User).where(User.telegram_id == message.from_user.id)
-        result = await session.execute(query)
-        installer = result.scalar_one_or_none()
-        
-        if not installer or installer.role != UserRole.INSTALLER:
-            await message.answer("Эта функция доступна только монтажникам")
-            return
-        
-        # Получаем статистику
-        # Всего выполнено
-        query = select(Request).where(
-            and_(
-                Request.installer_id == installer.id,
-                Request.status == RequestStatus.COMPLETED
-            )
-        )
-        result = await session.execute(query)
-        completed = len(result.scalars().all())
-        
-        # В работе
-        query = select(Request).where(
-            and_(
-                Request.installer_id == installer.id,
-                Request.status == RequestStatus.IN_PROGRESS
-            )
-        )
-        result = await session.execute(query)
-        in_progress = len(result.scalars().all())
-        
-        # Отказы
-        query = select(Refusal).where(Refusal.installer_id == installer.id)
-        result = await session.execute(query)
-        refusals = len(result.scalars().all())
-        
-        # За последние 30 дней
-        month_ago = datetime.now() - datetime.timedelta(days=30)
-        query = select(Request).where(
-            and_(
-                Request.installer_id == installer.id,
-                Request.status == RequestStatus.COMPLETED,
-                Request.completed_at >= month_ago
-            )
-        )
-        result = await session.execute(query)
-        month_completed = len(result.scalars().all())
-        
-        text = f"📊 <b>Статистика монтажника</b>\n\n"
-        text += f"👤 {installer.first_name or installer.username}\n\n"
-        text += f"✅ Выполнено всего: {completed}\n"
-        text += f"🔵 В работе: {in_progress}\n"
-        text += f"❌ Отказов: {refusals}\n"
-        text += f"📅 За 30 дней: {month_completed}\n"
-        
-        await message.answer(text, parse_mode="HTML")
-        
-    except Exception as e:
-        logger.error(f"Ошибка в cmd_my_stats: {e}")
-        await message.answer("❌ Ошибка при получении статистики")
-
-async def send_request_details(message: Message, request: Request, installer: User, session: AsyncSession):
+async def send_request_details(message: Message, request: Request, installer: User, session):
     """
     Отправка деталей заявки монтажнику
     """
